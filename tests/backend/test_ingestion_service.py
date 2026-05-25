@@ -4,7 +4,7 @@ import uuid
 from sqlalchemy import select
 
 from app.db.session import get_session_factory
-from app.models.document import Document, DocumentChunk
+from app.models.document import Document, DocumentChunk, DocumentChunkEmbedding
 from app.models.source import SourceSyncJob
 from app.services.ingestion import (
     DOCUMENT_STATUS_COMPLETED,
@@ -197,3 +197,59 @@ def test_reprocess_updates_richer_chunk_metadata_for_structured_markdown(client)
         assert chunks[0].metadata_json["section_title"] == "Exceptions"
         assert chunks[0].metadata_json["section_path"] == ["Retention Policy", "Exceptions"]
         assert "Timelines" not in chunks[0].content
+
+
+def test_reprocess_replaces_persisted_embeddings_with_chunks(client):
+    upload_response = client.post(
+        "/api/v1/documents/upload",
+        files={
+            "file": (
+                "embedding-lifecycle.md",
+                (
+                    b"# Retention Policy\n\n"
+                    b"Records are retained for thirty days.\n\n"
+                    b"# Access Policy\n\n"
+                    b"Access reviews happen quarterly.\n"
+                ),
+                "text/markdown",
+            )
+        },
+    )
+    document_id = upload_response.json()["data"]["document_id"]
+    service = LocalDocumentIngestionService()
+
+    with get_session_factory()() as db:
+        document = db.get(Document, uuid.UUID(document_id))
+        assert document is not None
+        original_chunks = db.scalars(select(DocumentChunk).where(DocumentChunk.document_id == document.id)).all()
+        original_chunk_ids = {chunk.id for chunk in original_chunks}
+        original_embeddings = db.scalars(
+            select(DocumentChunkEmbedding).where(DocumentChunkEmbedding.document_id == document.id)
+        ).all()
+        assert len(original_chunks) == len(original_embeddings)
+        assert {embedding.chunk_id for embedding in original_embeddings} == original_chunk_ids
+
+        stored_path = service._storage.resolve_path(document.storage_path)
+        stored_path.write_text(
+            "# Retention Policy\n\nRecords are retained for ninety days after reprocess.\n",
+            encoding="utf-8",
+        )
+
+    result = service.process_document(document_id, trigger="embedding-reprocess")
+    assert result.outcome == "completed"
+
+    with get_session_factory()() as db:
+        document = db.get(Document, uuid.UUID(document_id))
+        assert document is not None
+        replacement_chunks = db.scalars(select(DocumentChunk).where(DocumentChunk.document_id == document.id)).all()
+        replacement_chunk_ids = {chunk.id for chunk in replacement_chunks}
+        replacement_embeddings = db.scalars(
+            select(DocumentChunkEmbedding).where(DocumentChunkEmbedding.document_id == document.id)
+        ).all()
+
+        assert replacement_chunk_ids
+        assert replacement_chunk_ids.isdisjoint(original_chunk_ids)
+        assert len(replacement_chunks) == len(replacement_embeddings)
+        assert {embedding.chunk_id for embedding in replacement_embeddings} == replacement_chunk_ids
+        assert all(embedding.embedding_model == "local-hashing-v1" for embedding in replacement_embeddings)
+        assert all(embedding.embedding_dimension == 256 for embedding in replacement_embeddings)
