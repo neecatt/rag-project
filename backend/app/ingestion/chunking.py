@@ -46,6 +46,7 @@ class DocumentChunker:
                 boundary_break
                 and (
                     _is_hard_boundary(current_segments[-1], segment)
+                    or _requires_tight_boundary(current_segments[-1], segment)
                     or len(current_text) >= max(self.config.min_chunk_chars // 2, 80)
                 )
             )
@@ -59,7 +60,10 @@ class DocumentChunker:
             current_text = _join_segments(current_text, str(segment["text"]))
 
         if current_segments:
-            if chunks and len(current_text.strip()) < self.config.min_chunk_chars:
+            if chunks and len(current_text.strip()) < self.config.min_chunk_chars and _can_merge_trailing_chunk(
+                list(chunks[-1].metadata["_segments"]),
+                current_segments,
+            ):
                 previous = chunks.pop()
                 merged_segments = list(previous.metadata["_segments"]) + current_segments
                 chunks.append(
@@ -251,7 +255,7 @@ def _should_break_on_structure_change(left: dict[str, object], right: dict[str, 
     right_slide = right.get("slide_label")
     if left_slide and right_slide and left_slide != right_slide:
         return True
-    if right.get("kind") in {"heading", "page_heading", "slide_heading"}:
+    if right.get("kind") in {"heading", "resume_heading", "page_heading", "slide_heading", "slide_section_heading"}:
         return True
     left_path = list(left.get("section_path") or [])
     right_path = list(right.get("section_path") or [])
@@ -263,6 +267,18 @@ def _is_hard_boundary(left: dict[str, object], right: dict[str, object]) -> bool
         left.get("page_number") != right.get("page_number")
         or left.get("slide_label") != right.get("slide_label")
     )
+
+
+def _requires_tight_boundary(left: dict[str, object], right: dict[str, object]) -> bool:
+    left_kind = left.get("kind")
+    right_kind = right.get("kind")
+    if left_kind in {"header", "resume_heading", "slide_heading", "slide_section_heading"}:
+        return True
+    if right_kind in {"resume_heading", "slide_heading", "slide_section_heading"}:
+        return True
+    left_path = list(left.get("section_path") or [])
+    right_path = list(right.get("section_path") or [])
+    return bool(right_path and left_path != right_path)
 
 
 def _chunk_section_path(segments: list[dict[str, object]]) -> list[str]:
@@ -317,3 +333,12 @@ def _update_section_path(section_path: list[str], title: str, level: int) -> lis
 
 def _estimate_token_count(text: str) -> int:
     return len(text.split())
+
+
+def _can_merge_trailing_chunk(
+    previous_segments: list[dict[str, object]],
+    current_segments: list[dict[str, object]],
+) -> bool:
+    if not previous_segments or not current_segments:
+        return True
+    return not _requires_tight_boundary(previous_segments[-1], current_segments[0])
