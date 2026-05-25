@@ -263,10 +263,6 @@ function normalizeCitation(record: unknown) {
     chunk_id: String(citation.chunk_id ?? makeId("chunk")),
     title: asNonEmptyString(citation.title) ?? "Supporting excerpt",
     locator: buildCitationLocator(citation),
-    excerpt:
-      asNonEmptyString(citation.excerpt) ??
-      asNonEmptyString(citation.snippet) ??
-      asNonEmptyString(citation.text),
   };
 }
 
