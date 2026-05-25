@@ -1,0 +1,706 @@
+openapi: 3.1.0
+info:
+  title: RAG Project API
+  version: 0.1.0
+  license:
+    name: Proprietary
+    identifier: LicenseRef-Proprietary
+  description: >
+    Contract-first API for the RAG project. Backend, frontend, and ingestion
+    work must update this file before changing HTTP request or response shapes.
+servers:
+  - url: /api/v1
+    description: API v1 base path
+tags:
+  - name: health
+    description: Service health and readiness.
+  - name: sources
+    description: Knowledge source registration, upload, and sync.
+  - name: documents
+    description: Uploaded documents and processing status.
+  - name: search
+    description: Grounded retrieval over processed document chunks.
+  - name: conversations
+    description: Persisted chat conversations and messages.
+  - name: chat
+    description: Stateless or session-backed chat entry point.
+security: []
+paths:
+  /health:
+    get:
+      tags: [health]
+      summary: Check backend readiness
+      operationId: getHealth
+      responses:
+        "200":
+          description: Health status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+        "500":
+          $ref: "#/components/responses/Error"
+        "400":
+          $ref: "#/components/responses/Error"
+  /sources:
+    get:
+      tags: [sources]
+      summary: List sources
+      operationId: listSources
+      responses:
+        "200":
+          description: Source list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SourceListResponse"
+        "500":
+          $ref: "#/components/responses/Error"
+        "400":
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [sources]
+      summary: Create a source
+      operationId: createSource
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SourceCreateRequest"
+      responses:
+        "201":
+          description: Created source
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SourceCreateResponse"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+  /sources/{source_id}/upload:
+    post:
+      tags: [sources]
+      summary: Upload a file into a source
+      operationId: uploadSourceDocument
+      parameters:
+        - $ref: "#/components/parameters/SourceId"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "202":
+          description: Upload accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentUploadResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /sources/{source_id}/sync:
+    post:
+      tags: [sources]
+      summary: Trigger source sync or reprocessing
+      operationId: syncSource
+      parameters:
+        - $ref: "#/components/parameters/SourceId"
+      responses:
+        "202":
+          description: Sync accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SourceSyncResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /documents:
+    get:
+      tags: [documents]
+      summary: List documents
+      operationId: listDocuments
+      responses:
+        "200":
+          description: Document list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentListResponse"
+        "500":
+          $ref: "#/components/responses/Error"
+        "400":
+          $ref: "#/components/responses/Error"
+  /documents/upload:
+    post:
+      tags: [documents]
+      summary: Upload a standalone document
+      operationId: uploadDocument
+      parameters:
+        - name: workspace_id
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "202":
+          description: Upload accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentUploadResponse"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+  /documents/{document_id}/status:
+    get:
+      tags: [documents]
+      summary: Get processing status for one document
+      operationId: getDocumentStatus
+      parameters:
+        - $ref: "#/components/parameters/DocumentId"
+      responses:
+        "200":
+          description: Document status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentStatusResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /search:
+    post:
+      tags: [search]
+      summary: Search processed document chunks
+      operationId: searchDocuments
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SearchRequest"
+      responses:
+        "200":
+          description: Search results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchResponse"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+  /conversations:
+    get:
+      tags: [conversations]
+      summary: List conversations
+      operationId: listConversations
+      responses:
+        "200":
+          description: Conversation list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConversationListResponse"
+        "500":
+          $ref: "#/components/responses/Error"
+        "400":
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [conversations]
+      summary: Create a conversation
+      operationId: createConversation
+      responses:
+        "201":
+          description: Created conversation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConversationCreateResponse"
+        "500":
+          $ref: "#/components/responses/Error"
+        "400":
+          $ref: "#/components/responses/Error"
+  /conversations/{conversation_id}:
+    get:
+      tags: [conversations]
+      summary: Get conversation detail
+      operationId: getConversation
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+      responses:
+        "200":
+          description: Conversation detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConversationDetailResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /conversations/{conversation_id}/messages:
+    post:
+      tags: [conversations]
+      summary: Add a user message and generate assistant reply
+      operationId: createConversationMessage
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConversationMessageCreateRequest"
+      responses:
+        "200":
+          description: Assistant message
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrontendChatMessageResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /chat:
+    post:
+      tags: [chat]
+      summary: Create or continue a chat session
+      operationId: createChatMessage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatRequest"
+      responses:
+        "202":
+          description: Chat turn accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatResponse"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+components:
+  parameters:
+    SourceId:
+      name: source_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    DocumentId:
+      name: document_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ConversationId:
+      name: conversation_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+  responses:
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ValidationError:
+      description: Request validation failed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Error:
+      description: Error response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+  schemas:
+    HealthResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [status, services]
+          properties:
+            status:
+              type: string
+              example: ok
+            services:
+              type: object
+              additionalProperties:
+                type: string
+    SourceRecord:
+      type: object
+      required: [id, name, type, status, classification, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        type:
+          type: string
+          example: upload
+        status:
+          type: string
+          example: active
+        classification:
+          type: string
+          example: internal
+        workspace_id:
+          type: [string, "null"]
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+    SourceCreateRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+          default: upload
+        workspace_id:
+          type: [string, "null"]
+          format: uuid
+        classification:
+          type: string
+          default: internal
+        config:
+          type: [object, "null"]
+          additionalProperties: true
+    SourceListResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/SourceRecord"
+    SourceCreateResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/SourceRecord"
+    SourceSyncResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [job_id, status]
+          properties:
+            job_id:
+              type: string
+              format: uuid
+            status:
+              type: string
+              example: queued
+    DocumentUploadResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [document_id, status]
+          properties:
+            document_id:
+              type: string
+              format: uuid
+            filename:
+              type: string
+            status:
+              type: string
+              enum: [queued, processing, completed, failed]
+            error_message:
+              type: [string, "null"]
+    DocumentStatusResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/DocumentStatus"
+    DocumentStatus:
+      type: object
+      required: [document_id, title, filename, status, processing_attempts, created_at, updated_at]
+      properties:
+        document_id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        filename:
+          type: string
+        status:
+          type: string
+          enum: [queued, processing, completed, failed]
+        error_message:
+          type: [string, "null"]
+        processing_attempts:
+          type: integer
+          minimum: 0
+        processed_at:
+          type: [string, "null"]
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    DocumentRecord:
+      type: object
+      required: [id, title, status, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        source_id:
+          type: [string, "null"]
+          format: uuid
+        source_name:
+          type: [string, "null"]
+        document_type:
+          type: [string, "null"]
+        mime_type:
+          type: [string, "null"]
+        status:
+          type: string
+        updated_at:
+          type: string
+          format: date-time
+    DocumentListResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/DocumentRecord"
+    SearchRequest:
+      type: object
+      required: [query]
+      properties:
+        query:
+          type: string
+        workspace_id:
+          type: [string, "null"]
+          format: uuid
+        filters:
+          type: object
+          properties:
+            source_ids:
+              type: array
+              items:
+                type: string
+                format: uuid
+          additionalProperties: false
+        top_k:
+          type: integer
+          minimum: 1
+          default: 10
+    SearchResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [results]
+          properties:
+            results:
+              type: array
+              items:
+                $ref: "#/components/schemas/SearchResult"
+    SearchResult:
+      type: object
+      required: [chunk_id, document_id, score, snippet, citation]
+      properties:
+        chunk_id:
+          type: string
+        document_id:
+          type: string
+        document_title:
+          type: [string, "null"]
+        score:
+          type: number
+        snippet:
+          type: string
+        source_id:
+          type: [string, "null"]
+        citation:
+          $ref: "#/components/schemas/Citation"
+    Citation:
+      type: object
+      required: [document_id, chunk_id, title, locator]
+      properties:
+        document_id:
+          type: string
+        chunk_id:
+          type: string
+        title:
+          type: string
+        locator:
+          type: string
+        source_id:
+          type: [string, "null"]
+        page_number:
+          type: [integer, "null"]
+        section_title:
+          type: [string, "null"]
+    ConversationRecord:
+      type: object
+      required: [id, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: [string, "null"]
+        updated_at:
+          type: string
+          format: date-time
+    ConversationListResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConversationRecord"
+    ConversationCreateResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/ConversationRecord"
+    ConversationDetailResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [id, updated_at, messages]
+          properties:
+            id:
+              type: string
+              format: uuid
+            title:
+              type: [string, "null"]
+            updated_at:
+              type: string
+              format: date-time
+            messages:
+              type: array
+              items:
+                $ref: "#/components/schemas/ChatMessage"
+    ConversationMessageCreateRequest:
+      type: object
+      required: [content]
+      properties:
+        content:
+          type: string
+        options:
+          $ref: "#/components/schemas/ChatOptions"
+    ChatOptions:
+      type: object
+      properties:
+        stream:
+          type: boolean
+          default: false
+        top_k:
+          type: integer
+          default: 3
+          minimum: 1
+    ChatRequest:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+        session_id:
+          type: [string, "null"]
+          format: uuid
+        workspace_id:
+          type: [string, "null"]
+          format: uuid
+        options:
+          $ref: "#/components/schemas/ChatOptions"
+    ChatResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [session_id, messages]
+          properties:
+            session_id:
+              type: string
+              format: uuid
+            messages:
+              type: array
+              items:
+                $ref: "#/components/schemas/ChatMessage"
+    FrontendChatMessageResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: "#/components/schemas/ChatMessage"
+    ChatMessage:
+      type: object
+      required: [id, role, content, citations, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        message_id:
+          type: string
+          format: uuid
+          deprecated: true
+        role:
+          type: string
+          enum: [user, assistant, system]
+        content:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        citations:
+          type: array
+          items:
+            $ref: "#/components/schemas/Citation"
+    ErrorResponse:
+      type: object
+      properties:
+        detail:
+          oneOf:
+            - type: string
+            - type: object
+            - type: array

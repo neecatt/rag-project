@@ -1,0 +1,11 @@
+# Lead engineer reviews all integration changes.
+* @lead-engineer
+
+# Component ownership. Replace placeholders with real GitHub handles.
+/backend/ @backend-engineer
+/frontend/ @frontend-engineer
+/backend/app/ingestion/ @data-ingestion-engineer
+/backend/app/services/ingestion.py @data-ingestion-engineer
+/backend/app/services/text_extraction.py @data-ingestion-engineer
+/openapi.yaml @lead-engineer
+/docs/api-contract.md @lead-engineer

@@ -1,0 +1,12 @@
+.DS_Store
+.env
+.pytest_cache/
+__pycache__/
+*.py[cod]
+
+backend/.venv/
+backend/*.db
+backend/rag_project_backend.egg-info/
+
+frontend/.next/
+frontend/node_modules/
