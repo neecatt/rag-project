@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -21,6 +21,8 @@ async def create_chat_message(
     chat_service: ChatService = Depends(get_chat_service),
 ) -> ChatResponse:
     session = db.get(ChatSession, payload.session_id) if payload.session_id else None
+    if payload.session_id and session is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
     if session is None:
         session = ChatSession(workspace_id=payload.workspace_id, title="New chat")
         db.add(session)

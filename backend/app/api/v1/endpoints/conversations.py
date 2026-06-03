@@ -8,11 +8,11 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.models.chat import ChatMessage, ChatSession
 from app.schemas.chat import (
-    ChatRequest,
     ConversationCreateResponse,
     ConversationDetail,
     ConversationDetailResponse,
     ConversationListResponse,
+    ConversationMessageCreateRequest,
     ConversationRecord,
     FrontendChatMessage,
     FrontendChatMessageResponse,
@@ -76,10 +76,16 @@ def get_conversation(conversation_id: uuid.UUID, db: Session = Depends(get_db)) 
 @router.post("/{conversation_id}/messages", response_model=FrontendChatMessageResponse)
 async def create_conversation_message(
     conversation_id: uuid.UUID,
-    payload: ChatRequest,
+    payload: ConversationMessageCreateRequest,
     db: Session = Depends(get_db),
     chat_service: ChatService = Depends(get_chat_service),
 ) -> FrontendChatMessageResponse:
+    if payload.session_id is not None and payload.session_id != conversation_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="session_id must match conversation_id",
+        )
+
     session = db.get(ChatSession, conversation_id)
     if session is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")

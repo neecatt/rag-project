@@ -1,4 +1,5 @@
 import asyncio
+import uuid
 from types import SimpleNamespace
 
 from app.services.answer_generation import GroundedGenerationRequest
@@ -134,6 +135,39 @@ def test_existing_custom_conversation_title_is_preserved_after_first_message(cli
     detail_response = client.get(f"/api/v1/conversations/{conversation_id}")
     assert detail_response.status_code == 200
     assert detail_response.json()["data"]["title"] == first_message
+
+
+def test_chat_returns_not_found_for_unknown_session_id(client):
+    response = client.post(
+        "/api/v1/chat",
+        json={"message": "Continue the missing conversation.", "session_id": str(uuid.uuid4())},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Conversation not found"
+
+
+def test_conversation_message_rejects_mismatched_session_id(client):
+    conversation_id = client.post("/api/v1/conversations", json={}).json()["data"]["id"]
+
+    response = client.post(
+        f"/api/v1/conversations/{conversation_id}/messages",
+        json={"message": "This should fail.", "session_id": str(uuid.uuid4())},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "session_id must match conversation_id"
+
+
+def test_existing_custom_conversation_title_is_preserved_after_subsequent_messages(client):
+    conversation_id = client.post("/api/v1/conversations", json={}).json()["data"]["id"]
+
+    first_message = "Keep the custom title intact."
+    response = client.post(
+        f"/api/v1/conversations/{conversation_id}/messages",
+        json={"message": first_message},
+    )
+    assert response.status_code == 200
 
     second_message = "Second message should not replace a meaningful title."
     response = client.post(

@@ -37,6 +37,9 @@ CI runs the same OpenAPI validation on every PR.
 - `status` for documents is one of `queued`, `processing`, `completed`, or `failed`.
 - Chat/search citations must identify the evidence actually used or returned by the backend.
 - Citation display should prefer `title`, `locator`, `page_number`, and `section_title` over internal IDs.
+- `POST /conversations/{conversation_id}/messages` and `POST /chat` accept a `message` field for user input.
+- `POST /chat` returns `404` when a provided `session_id` does not exist.
+- `POST /conversations/{conversation_id}/messages` returns `422` when a provided `session_id` does not match the path `conversation_id`.
 
 ## Mocking Guidance
 
