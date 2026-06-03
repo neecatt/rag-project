@@ -1,10 +1,6 @@
 import { cn } from "@/lib/utils";
 import type { Citation } from "@/lib/types";
 
-type EvidenceCitation = Citation & {
-  excerpt?: string;
-};
-
 export function SectionCard({
   className,
   children,
@@ -120,7 +116,7 @@ export function EvidenceList({
   title = "Supporting evidence",
   emptyLabel = "No citations returned",
 }: {
-  citations?: EvidenceCitation[];
+  citations?: Citation[];
   title?: string;
   emptyLabel?: string;
 }) {
@@ -149,11 +145,6 @@ export function EvidenceList({
             {citation.locator ? (
               <p className="mt-2 text-xs uppercase tracking-[0.16em] text-slate-500">
                 {citation.locator}
-              </p>
-            ) : null}
-            {citation.excerpt ? (
-              <p className="mt-3 border-l-2 border-slate-200 pl-3 text-sm leading-6 text-slate-600">
-                {citation.excerpt}
               </p>
             ) : null}
           </div>
