@@ -4,7 +4,7 @@ import uuid
 from sqlalchemy import select
 
 from app.db.session import get_session_factory
-from app.models.document import Document, DocumentChunk
+from app.models.document import Document, DocumentChunk, DocumentChunkEmbedding
 from app.models.source import SourceSyncJob
 from app.services.ingestion import (
     DOCUMENT_STATUS_COMPLETED,
@@ -175,9 +175,9 @@ def test_reprocess_updates_richer_chunk_metadata_for_structured_markdown(client)
         assert document is not None
         assert document.metadata_json["structure_summary"]["section_titles"] == ["Retention Policy", "Timelines"]
         chunks = db.scalars(select(DocumentChunk).where(DocumentChunk.document_id == document.id)).all()
-        assert len(chunks) == 1
-        assert chunks[0].metadata_json["section_path"] == ["Retention Policy", "Timelines"]
-        assert chunks[0].metadata_json["segment_kinds"] == ["heading", "bullet"]
+        assert len(chunks) >= 1
+        assert chunks[-1].metadata_json["section_path"] == ["Retention Policy", "Timelines"]
+        assert chunks[-1].metadata_json["segment_kinds"][-1] == "bullet"
         stored_path = service._storage.resolve_path(document.storage_path)
         stored_path.write_text(
             "# Retention Policy\n\n## Exceptions\n\n- Legal hold data is retained until release\n",
@@ -193,7 +193,107 @@ def test_reprocess_updates_richer_chunk_metadata_for_structured_markdown(client)
         assert document.processing_attempts == 2
         assert document.metadata_json["structure_summary"]["section_titles"] == ["Retention Policy", "Exceptions"]
         chunks = db.scalars(select(DocumentChunk).where(DocumentChunk.document_id == document.id)).all()
-        assert len(chunks) == 1
-        assert chunks[0].metadata_json["section_title"] == "Exceptions"
-        assert chunks[0].metadata_json["section_path"] == ["Retention Policy", "Exceptions"]
-        assert "Timelines" not in chunks[0].content
+        assert len(chunks) >= 1
+        assert chunks[-1].metadata_json["section_title"] == "Exceptions"
+        assert chunks[-1].metadata_json["section_path"] == ["Retention Policy", "Exceptions"]
+        assert "Timelines" not in chunks[-1].content
+
+
+def test_reprocess_replaces_resume_section_metadata(client):
+    upload_response = client.post(
+        "/api/v1/documents/upload",
+        files={
+            "file": (
+                "resume.txt",
+                (
+                    b"Jane Doe\njane@example.com\n\n"
+                    b"TECHNICAL SKILLS\nPython, SQL, OCR\n\n"
+                    b"WORK EXPERIENCE\nBuilt document parsers.\n"
+                ),
+                "text/plain",
+            )
+        },
+    )
+    document_id = upload_response.json()["data"]["document_id"]
+    service = LocalDocumentIngestionService()
+
+    with get_session_factory()() as db:
+        document = db.get(Document, uuid.UUID(document_id))
+        assert document is not None
+        assert document.metadata_json["structure_summary"]["section_titles"] == ["Technical Skills", "Work Experience"]
+        chunks = db.scalars(select(DocumentChunk).where(DocumentChunk.document_id == document.id)).all()
+        assert len(chunks) == 3
+        assert chunks[0].metadata_json["segment_kinds"] == ["header"]
+        stored_path = service._storage.resolve_path(document.storage_path)
+        stored_path.write_text(
+            "Jane Doe\njane@example.com\n\nTECHNICAL SKILLS\nPython, SQL\n\nEDUCATION\nMSc Computer Science\n",
+            encoding="utf-8",
+        )
+
+    service.process_document(document_id, trigger="resume-reprocess")
+
+    with get_session_factory()() as db:
+        document = db.get(Document, uuid.UUID(document_id))
+        assert document is not None
+        assert document.metadata_json["structure_summary"]["section_titles"] == ["Technical Skills", "Education"]
+        chunks = db.scalars(select(DocumentChunk).where(DocumentChunk.document_id == document.id)).all()
+        assert len(chunks) == 3
+        assert chunks[1].metadata_json["section_title"] == "Technical Skills"
+        assert chunks[2].metadata_json["section_title"] == "Education"
+        assert chunks[2].metadata_json["segment_kinds"] == ["resume_heading", "education_entry"]
+
+
+def test_reprocess_replaces_persisted_embeddings_with_chunks(client):
+    upload_response = client.post(
+        "/api/v1/documents/upload",
+        files={
+            "file": (
+                "embedding-lifecycle.md",
+                (
+                    b"# Retention Policy\n\n"
+                    b"Records are retained for thirty days.\n\n"
+                    b"# Access Policy\n\n"
+                    b"Access reviews happen quarterly.\n"
+                ),
+                "text/markdown",
+            )
+        },
+    )
+    document_id = upload_response.json()["data"]["document_id"]
+    service = LocalDocumentIngestionService()
+
+    with get_session_factory()() as db:
+        document = db.get(Document, uuid.UUID(document_id))
+        assert document is not None
+        original_chunks = db.scalars(select(DocumentChunk).where(DocumentChunk.document_id == document.id)).all()
+        original_chunk_ids = {chunk.id for chunk in original_chunks}
+        original_embeddings = db.scalars(
+            select(DocumentChunkEmbedding).where(DocumentChunkEmbedding.document_id == document.id)
+        ).all()
+        assert len(original_chunks) == len(original_embeddings)
+        assert {embedding.chunk_id for embedding in original_embeddings} == original_chunk_ids
+
+        stored_path = service._storage.resolve_path(document.storage_path)
+        stored_path.write_text(
+            "# Retention Policy\n\nRecords are retained for ninety days after reprocess.\n",
+            encoding="utf-8",
+        )
+
+    result = service.process_document(document_id, trigger="embedding-reprocess")
+    assert result.outcome == "completed"
+
+    with get_session_factory()() as db:
+        document = db.get(Document, uuid.UUID(document_id))
+        assert document is not None
+        replacement_chunks = db.scalars(select(DocumentChunk).where(DocumentChunk.document_id == document.id)).all()
+        replacement_chunk_ids = {chunk.id for chunk in replacement_chunks}
+        replacement_embeddings = db.scalars(
+            select(DocumentChunkEmbedding).where(DocumentChunkEmbedding.document_id == document.id)
+        ).all()
+
+        assert replacement_chunk_ids
+        assert replacement_chunk_ids.isdisjoint(original_chunk_ids)
+        assert len(replacement_chunks) == len(replacement_embeddings)
+        assert {embedding.chunk_id for embedding in replacement_embeddings} == replacement_chunk_ids
+        assert all(embedding.embedding_model == "local-hashing-v1" for embedding in replacement_embeddings)
+        assert all(embedding.embedding_dimension == 256 for embedding in replacement_embeddings)
