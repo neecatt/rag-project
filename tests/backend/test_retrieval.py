@@ -4,10 +4,11 @@ from types import SimpleNamespace
 from backend.app.retrieval.hybrid import HybridRetriever, HybridScoringConfig
 from backend.app.retrieval.interfaces import RetrievalQuery
 from backend.app.retrieval.keyword_search import InMemoryKeywordSearch
+from backend.app.retrieval.rerank import DeterministicReranker
 from backend.app.retrieval.text import build_index_text
 from backend.app.retrieval.storage import InMemoryPgVectorStore, PgVectorEmbeddingRecord
 from backend.app.retrieval.vector_search import PgVectorSearch
-from backend.app.services.document_models import SourceChunk
+from backend.app.services.document_models import SearchResult, SourceChunk
 from backend.app.services.embeddings import HashingEmbeddingProvider, OpenAICompatibleEmbeddingProvider, TfidfEmbeddingProvider, get_embedding_provider
 
 
@@ -23,6 +24,10 @@ def _chunk(chunk_id: str, title: str, text: str, source_id: str = "source-a") ->
         document_title=title,
         metadata={"classification": "internal"},
     )
+
+
+def _result(chunk: SourceChunk, score: float) -> SearchResult:
+    return SearchResult(chunk=chunk, score=score, vector_score=score, keyword_score=score, rank=1)
 
 
 class RetrievalTests(unittest.TestCase):
@@ -128,6 +133,44 @@ class RetrievalTests(unittest.TestCase):
 
         self.assertEqual(results[0].chunk.chunk_id, "chunk-a")
         self.assertGreater(results[0].score, results[1].score)
+
+    def test_deterministic_reranker_promotes_skills_section_over_contact_header(self) -> None:
+        header = _chunk(
+            "header",
+            "Nijat_CV.pdf",
+            "Nijat Hasanov\nBaku, Azerbaijan\nEmail: nijat@example.com",
+        )
+        skills = _chunk(
+            "skills",
+            "Nijat_CV.pdf",
+            "Technical Skills\nPython, FastAPI, PostgreSQL, Docker, Redis, SQLAlchemy",
+        )
+
+        reranked = DeterministicReranker().rerank(
+            query="Review the Nijat CV and tell me his skills",
+            results=[_result(header, 2.0), _result(skills, 0.4)],
+        )
+
+        self.assertEqual(reranked[0].chunk.chunk_id, "skills")
+
+    def test_deterministic_reranker_promotes_slide_specific_chunk(self) -> None:
+        paper = _chunk(
+            "paper",
+            "reft-paper-notes.txt",
+            "REFT is a fine-tuning method discussed in the paper, but this note does not describe slide 19.",
+        )
+        slide = _chunk(
+            "slide",
+            "ReFT_Presentation_Outline.txt",
+            "Slide 19: Evaluation results and limitations for ReFT.",
+        )
+
+        reranked = DeterministicReranker().rerank(
+            query="What is slide 19 about in the REFT presentation?",
+            results=[_result(paper, 2.0), _result(slide, 0.3)],
+        )
+
+        self.assertEqual(reranked[0].chunk.chunk_id, "slide")
 
 
 if __name__ == "__main__":

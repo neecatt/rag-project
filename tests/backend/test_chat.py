@@ -451,6 +451,58 @@ Built document ingestion pipelines and retrieval services.
     assert [citation.title for citation in reply.citations] == ["Nijat_CV.pdf"]
 
 
+def test_chat_reranker_selects_cv_skills_chunk_over_noisy_header_candidate():
+    header = _search_result(
+        "header",
+        "Nijat_CV.pdf",
+        "Nijat Hasanov\nBaku, Azerbaijan\nEmail: nijat@example.com\nLinkedIn: linkedin.example/nijat",
+        score=2.0,
+    )
+    skills = _search_result(
+        "skills",
+        "Nijat_CV.pdf",
+        "Technical Skills\nPython, FastAPI, PostgreSQL, Docker, Redis, SQLAlchemy, REST APIs",
+        score=0.3,
+    )
+    service = GroundedChatService(StaticRetrievalService([header, skills]))
+
+    reply = asyncio.run(
+        service.generate_reply(
+            session=SimpleNamespace(workspace_id=None),
+            user_message=SimpleNamespace(content="Review the Nijat CV and tell me his skills"),
+        )
+    )
+
+    assert reply.content == "Skills: Python, FastAPI, PostgreSQL, Docker, Redis, SQLAlchemy, REST APIs."
+    assert [citation.chunk_id for citation in reply.citations] == ["skills"]
+
+
+def test_chat_reranker_selects_slide_chunk_over_related_paper_candidate():
+    paper = _search_result(
+        "paper",
+        "reft-paper-notes.txt",
+        "REFT is a fine-tuning method discussed in the paper, but this note does not describe slide 19.",
+        score=2.0,
+    )
+    slide = _search_result(
+        "slide",
+        "ReFT_Presentation_Outline.txt",
+        "Slide 19: Evaluation results and limitations for ReFT.",
+        score=0.2,
+    )
+    service = GroundedChatService(StaticRetrievalService([paper, slide]))
+
+    reply = asyncio.run(
+        service.generate_reply(
+            session=SimpleNamespace(workspace_id=None),
+            user_message=SimpleNamespace(content="What is slide 19 about in the REFT presentation?"),
+        )
+    )
+
+    assert "Evaluation results and limitations for ReFT." in reply.content
+    assert [citation.title for citation in reply.citations] == ["ReFT_Presentation_Outline.txt"]
+
+
 def test_document_analysis_generation_receives_expanded_context():
     cv_text = """Nijat Hasanov
 Baku, Azerbaijan

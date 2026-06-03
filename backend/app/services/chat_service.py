@@ -5,6 +5,7 @@ import re
 
 from app.core.config import Settings, get_settings
 from app.models.chat import ChatMessage, ChatSession
+from app.retrieval.rerank import DeterministicReranker
 from app.retrieval.text import build_index_text
 from app.services.answer_generation import (
     AnswerGenerator,
@@ -396,11 +397,13 @@ class GroundedChatService:
         *,
         settings: Settings | None = None,
         evidence_selector: GroundedEvidenceSelector | None = None,
+        reranker: DeterministicReranker | None = None,
         answer_generator: AnswerGenerator | None = None,
     ) -> None:
         self._retrieval_service = retrieval_service
         self._settings = settings or get_settings()
         self._evidence_selector = evidence_selector or GroundedEvidenceSelector()
+        self._reranker = reranker or DeterministicReranker()
         self._answer_generator = answer_generator or ConfigurableAnswerGenerator(
             self._settings,
             fallback_generator=HeuristicFallbackAnswerGenerator(),
@@ -425,7 +428,8 @@ class GroundedChatService:
                 citations=[],
             )
 
-        selected_evidence = self._evidence_selector.select(question=user_message.content, results=results)
+        reranked_results = self._reranker.rerank(query=user_message.content, results=results)
+        selected_evidence = self._evidence_selector.select(question=user_message.content, results=reranked_results)
         generation_request = GroundedGenerationRequest(
             question=user_message.content,
             evidence=[
