@@ -16,7 +16,7 @@ class Document(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     title: Mapped[str] = mapped_column(String(512))
     filename: Mapped[str] = mapped_column(String(512))
     mime_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    status: Mapped[str] = mapped_column(String(50), default="uploaded", index=True)
+    status: Mapped[str] = mapped_column(String(50), default="queued", index=True)
     storage_backend: Mapped[str] = mapped_column(String(50), default="local")
     storage_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     file_size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)

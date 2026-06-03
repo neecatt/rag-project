@@ -23,7 +23,7 @@ from app.services.text_extraction import DocumentTextExtractor
 
 logger = logging.getLogger(__name__)
 
-DOCUMENT_STATUS_UPLOADED = "uploaded"
+DOCUMENT_STATUS_QUEUED = "queued"
 DOCUMENT_STATUS_PROCESSING = "processing"
 DOCUMENT_STATUS_COMPLETED = "completed"
 DOCUMENT_STATUS_FAILED = "failed"
@@ -87,7 +87,7 @@ class LocalDocumentIngestionService(DocumentIngestionService):
             title=file_name if file_name else (source.name if source else "untitled"),
             filename=file_name,
             mime_type=upload.content_type,
-            status=DOCUMENT_STATUS_UPLOADED,
+            status=DOCUMENT_STATUS_QUEUED,
         )
         db.add(document)
         db.flush()
@@ -113,8 +113,11 @@ class LocalDocumentIngestionService(DocumentIngestionService):
             },
             "document_type": Path(file_name).suffix.lower().lstrip(".") or None,
             "processing": {
-                "status": DOCUMENT_STATUS_UPLOADED,
+                "status": DOCUMENT_STATUS_QUEUED,
                 "last_trigger": "upload",
+                "active": False,
+                "current_run_id": None,
+                "error_message": None,
             },
         }
         db.commit()
