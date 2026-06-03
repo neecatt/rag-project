@@ -84,7 +84,7 @@ class IngestionPipelineTests(unittest.TestCase):
             self.assertEqual(status_payload["processing_attempts"], 1)
             self.assertIsNone(status_payload["processed_at"])
 
-    def test_background_mode_returns_uploaded_then_completes(self) -> None:
+    def test_background_mode_returns_queued_then_completes(self) -> None:
         with self._client(mode="background") as client:
             response = client.post(
                 "/api/v1/documents/upload",
@@ -93,7 +93,7 @@ class IngestionPipelineTests(unittest.TestCase):
 
             self.assertEqual(response.status_code, 202)
             payload = response.json()["data"]
-            self.assertEqual(payload["status"], "uploaded")
+            self.assertEqual(payload["status"], "queued")
 
             status_response = client.get(f"/api/v1/documents/{payload['document_id']}/status")
             status_payload = status_response.json()["data"]
