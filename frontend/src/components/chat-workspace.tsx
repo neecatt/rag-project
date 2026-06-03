@@ -139,13 +139,13 @@ export function ChatWorkspace() {
 
   return (
     <div className="grid gap-6 lg:grid-cols-[0.85fr_1.15fr]">
-      <SectionCard className="overflow-hidden">
-        <div className="flex items-center justify-between">
-          <div>
+      <SectionCard className="overflow-hidden p-5">
+        <div className="flex items-start justify-between gap-4 border-b border-slate-100/80 pb-4">
+          <div className="min-w-0">
             <h2 className="text-xl font-semibold tracking-tight text-slate-950">
               Conversation list
             </h2>
-            <p className="mt-2 text-sm leading-7 text-slate-600">
+            <p className="mt-1 text-sm leading-6 text-slate-600">
               Recent grounded threads backed by `/conversations`.
             </p>
           </div>
@@ -154,41 +154,65 @@ export function ChatWorkspace() {
           </Pill>
         </div>
 
-        <div className="mt-6 space-y-3">
+        <div className="mt-4">
           {loadingWorkspace ? (
             <EmptyState
               title="Loading conversations"
               description="Fetching persisted conversation history from the backend."
             />
           ) : conversations.length > 0 ? (
-            conversations.map((conversation) => (
-              <button
-                key={conversation.id}
-                type="button"
-                onClick={() => {
-                  setError(null);
-                  setConversationId(conversation.id);
-                }}
-                className={`block w-full rounded-[1.4rem] p-4 text-left transition duration-200 hover:-translate-y-0.5 ${
-                  conversationId === conversation.id
-                    ? "selectable-surface-active ring-1 ring-white/70"
-                    : "surface-soft selectable-surface text-slate-900"
-                }`}
-              >
-                <p className="font-medium">
-                  {getConversationTitle(conversation) ?? "Untitled thread"}
-                </p>
-                <p
-                  className={`mt-1 text-xs ${
+            <div className="space-y-2">
+              {conversations.map((conversation, index) => (
+                <button
+                  key={conversation.id}
+                  type="button"
+                  onClick={() => {
+                    setError(null);
+                    setConversationId(conversation.id);
+                  }}
+                  className={`block w-full rounded-[1.15rem] px-3.5 py-3 text-left transition duration-200 hover:-translate-y-0.5 ${
                     conversationId === conversation.id
-                      ? "text-sky-100"
-                      : "text-slate-500"
+                      ? "selectable-surface-active ring-1 ring-white/70"
+                      : "surface-soft selectable-surface text-slate-900"
                   }`}
                 >
-                  {formatDate(conversation.updated_at)}
-                </p>
-              </button>
-            ))
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={`h-2 w-2 flex-none rounded-full ${
+                            conversationId === conversation.id
+                              ? "bg-white/90"
+                              : "bg-slate-300"
+                          }`}
+                        />
+                        <p className="truncate text-sm font-medium">
+                          {getConversationTitle(conversation) ?? "Untitled thread"}
+                        </p>
+                      </div>
+                      <p
+                        className={`mt-1 pl-4 text-[11px] uppercase tracking-[0.14em] ${
+                          conversationId === conversation.id
+                            ? "text-sky-100/90"
+                            : "text-slate-500"
+                        }`}
+                      >
+                        Thread {index + 1}
+                      </p>
+                    </div>
+                    <p
+                      className={`whitespace-nowrap pt-0.5 text-[11px] ${
+                        conversationId === conversation.id
+                          ? "text-sky-100/90"
+                          : "text-slate-500"
+                      }`}
+                    >
+                      {formatDate(conversation.updated_at)}
+                    </p>
+                  </div>
+                </button>
+              ))}
+            </div>
           ) : (
             <EmptyState
               title="No conversations yet"
