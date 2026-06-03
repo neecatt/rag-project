@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class CitationPayload(BaseModel):
@@ -16,7 +16,7 @@ class CitationPayload(BaseModel):
 
 class ChatOptions(BaseModel):
     stream: bool = False
-    top_k: int = 3
+    top_k: int = Field(default=3, ge=1)
 
 
 class ChatRequest(BaseModel):
@@ -26,12 +26,16 @@ class ChatRequest(BaseModel):
     options: ChatOptions | None = None
 
 
+class ConversationMessageCreateRequest(ChatRequest):
+    pass
+
+
 class ChatTurnPayload(BaseModel):
     message_id: uuid.UUID
     role: str
     content: str
     created_at: datetime
-    citations: list[CitationPayload] = []
+    citations: list[CitationPayload] = Field(default_factory=list)
 
 
 class ChatResponsePayload(BaseModel):
@@ -72,7 +76,7 @@ class FrontendChatMessage(BaseModel):
     id: uuid.UUID
     role: str
     content: str
-    citations: list[CitationPayload] = []
+    citations: list[CitationPayload] = Field(default_factory=list)
     created_at: datetime
 
 

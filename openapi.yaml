@@ -271,6 +271,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/FrontendChatMessageResponse"
+        "422":
+          $ref: "#/components/responses/ValidationError"
         "404":
           $ref: "#/components/responses/NotFound"
   /chat:
@@ -291,6 +293,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ChatResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
         "422":
           $ref: "#/components/responses/ValidationError"
 components:
@@ -622,10 +626,18 @@ components:
                 $ref: "#/components/schemas/ChatMessage"
     ConversationMessageCreateRequest:
       type: object
-      required: [content]
+      required: [message]
       properties:
-        content:
+        message:
           type: string
+        session_id:
+          type: [string, "null"]
+          format: uuid
+          description: Optional session identifier that must match the conversation path when provided.
+        workspace_id:
+          type: [string, "null"]
+          format: uuid
+          description: Reserved for future tenant/workspace routing; currently ignored for existing conversations.
         options:
           $ref: "#/components/schemas/ChatOptions"
     ChatOptions:
@@ -647,6 +659,7 @@ components:
         session_id:
           type: [string, "null"]
           format: uuid
+          description: Continue an existing conversation. Returns 404 if the session does not exist.
         workspace_id:
           type: [string, "null"]
           format: uuid
