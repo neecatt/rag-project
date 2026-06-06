@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import logging
+import re
 from typing import Protocol
 from urllib import error, request
 
@@ -47,10 +48,11 @@ class OpenAICompatibleAnswerGenerator:
                     "role": "system",
                     "content": (
                         "Answer using only the provided evidence. "
-                        "For narrow factual questions, answer directly in one short sentence when possible. "
-                        "For synthesis, comparison, or summary questions, answer in two to four concise sentences that cover the needed points. "
-                        "Use only the evidence that is necessary for the answer, and do not add generic preambles, source lists, or unsupported filler. "
-                        "If the evidence contains labeled fields, sections, or lists that answer the question, extract only the relevant facts. "
+                        "For narrow factual questions, answer directly in one short complete sentence when possible. "
+                        "For synthesis, comparison, or summary questions, answer in two to four concise complete sentences that cover the needed points. "
+                        "If the answer is a list, return a clearly complete list line rather than a fragment. "
+                        "Do not add generic preambles, source lists, or unsupported filler. "
+                        "Only stop when the answer is complete. "
                         "If the evidence is insufficient, say so plainly."
                     ),
                 },
@@ -66,10 +68,7 @@ class OpenAICompatibleAnswerGenerator:
             timeout_seconds=self._settings.chat_answer_timeout_seconds,
             body=body,
         )
-        return GroundedGenerationResult(
-            content=answer,
-            used_evidence_indices=None,
-        )
+        return GroundedGenerationResult(content=answer, used_evidence_indices=None)
 
 
 class ConfigurableAnswerGenerator:
@@ -90,7 +89,7 @@ class ConfigurableAnswerGenerator:
 
         try:
             result = await self._live_generator.generate(request)
-            normalized = " ".join(result.content.split()).strip()
+            normalized = _finalize_generated_text(result.content, request.evidence)
             if normalized:
                 return GroundedGenerationResult(
                     content=normalized,
@@ -155,3 +154,68 @@ def _build_user_prompt(request_payload: GroundedGenerationRequest) -> str:
         f"Evidence:\n{evidence_block}\n\n"
         "Answer the question using only this evidence."
     )
+
+
+def _finalize_generated_text(text: str, evidence: list[GroundedGenerationEvidence]) -> str | None:
+    normalized = " ".join(text.split()).strip()
+    if not normalized or normalized.endswith("..."):
+        return None
+    if normalized[-1] in ",:;-/(":
+        return None
+
+    tokens = [token.lower().strip(".,:;!?") for token in normalized.rstrip(")").split()]
+    if tokens and tokens[-1] in {
+        "and",
+        "or",
+        "but",
+        "with",
+        "without",
+        "for",
+        "to",
+        "from",
+        "of",
+        "in",
+        "on",
+        "by",
+        "when",
+        "while",
+        "because",
+        "that",
+        "which",
+        "who",
+    }:
+        return None
+
+    completed = normalized if normalized[-1] in ".!?" else f"{normalized}."
+    if _looks_like_truncated_supported_unit(completed, evidence):
+        return None
+    return completed
+
+
+def _looks_like_truncated_supported_unit(answer: str, evidence: list[GroundedGenerationEvidence]) -> bool:
+    normalized_answer = _normalize_text(answer).strip(" .")
+    if not normalized_answer:
+        return True
+
+    for item in evidence:
+        for unit in _split_evidence_units(item.content):
+            normalized_unit = _normalize_text(unit).strip(" .")
+            if not normalized_unit or normalized_unit == normalized_answer:
+                continue
+            if normalized_unit.startswith(normalized_answer):
+                trailing = normalized_unit[len(normalized_answer) :].strip()
+                if trailing:
+                    return True
+    return False
+
+
+def _split_evidence_units(text: str) -> list[str]:
+    return [
+        " ".join(segment.split()).strip()
+        for segment in re.split(r"(?<=[.!?])\s+|\n+", text)
+        if segment.strip()
+    ]
+
+
+def _normalize_text(text: str) -> str:
+    return " ".join(text.lower().split())
