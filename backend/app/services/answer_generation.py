@@ -24,15 +24,21 @@ class GroundedGenerationRequest:
     evidence: list[GroundedGenerationEvidence]
 
 
+@dataclass(slots=True)
+class GroundedGenerationResult:
+    content: str
+    used_evidence_indices: list[int] | None = None
+
+
 class AnswerGenerator(Protocol):
-    async def generate(self, request: GroundedGenerationRequest) -> str: ...
+    async def generate(self, request: GroundedGenerationRequest) -> GroundedGenerationResult: ...
 
 
 class OpenAICompatibleAnswerGenerator:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
 
-    async def generate(self, request_payload: GroundedGenerationRequest) -> str:
+    async def generate(self, request_payload: GroundedGenerationRequest) -> GroundedGenerationResult:
         body = {
             "model": self._settings.chat_answer_model,
             "temperature": 0,
@@ -41,11 +47,11 @@ class OpenAICompatibleAnswerGenerator:
                     "role": "system",
                     "content": (
                         "Answer using only the provided evidence. "
-                        "Be concise by default. "
-                        "If one evidence passage is sufficient, answer directly in one short sentence. "
-                        "For document review, extraction, resume, CV, skills, experience, or education tasks, "
-                        "extract and organize the requested facts instead of repeating the beginning of the document. "
-                        "If multiple passages are needed, synthesize briefly without inventing facts. "
+                        "For narrow factual questions, answer directly in one short complete sentence when possible. "
+                        "For synthesis, comparison, or summary questions, answer in two to four concise complete sentences that cover the needed points. "
+                        "If the answer is a list, return a clearly complete list line rather than a fragment. "
+                        "Do not add generic preambles, source lists, or unsupported filler. "
+                        "Only stop when the answer is complete. "
                         "If the evidence is insufficient, say so plainly."
                     ),
                 },
@@ -55,12 +61,13 @@ class OpenAICompatibleAnswerGenerator:
                 },
             ],
         }
-        return await _run_blocking_http_json(
+        answer = await _run_blocking_http_json(
             url=str(self._settings.chat_answer_base_url),
             api_key=self._settings.chat_answer_api_key or "",
             timeout_seconds=self._settings.chat_answer_timeout_seconds,
             body=body,
         )
+        return GroundedGenerationResult(content=answer, used_evidence_indices=None)
 
 
 class ConfigurableAnswerGenerator:
@@ -75,15 +82,18 @@ class ConfigurableAnswerGenerator:
         ):
             self._live_generator = OpenAICompatibleAnswerGenerator(settings)
 
-    async def generate(self, request: GroundedGenerationRequest) -> str:
+    async def generate(self, request: GroundedGenerationRequest) -> GroundedGenerationResult:
         if self._live_generator is None:
             return await self._fallback_generator.generate(request)
 
         try:
-            answer = await self._live_generator.generate(request)
-            normalized = " ".join(answer.split()).strip()
+            result = await self._live_generator.generate(request)
+            normalized = _finalize_generated_text(result.content)
             if normalized:
-                return normalized
+                return GroundedGenerationResult(
+                    content=normalized,
+                    used_evidence_indices=result.used_evidence_indices,
+                )
         except Exception:
             logger.exception("grounded answer model call failed; falling back to local generator")
         return await self._fallback_generator.generate(request)
@@ -143,3 +153,39 @@ def _build_user_prompt(request_payload: GroundedGenerationRequest) -> str:
         f"Evidence:\n{evidence_block}\n\n"
         "Answer the question using only this evidence."
     )
+
+
+def _finalize_generated_text(text: str) -> str | None:
+    normalized = " ".join(text.split()).strip()
+    if not normalized:
+        return None
+    if normalized.endswith("..."):
+        return None
+    if normalized[-1] in ".!?":
+        return normalized
+    if normalized[-1] in ",:;-/(":
+        return None
+
+    tokens = [token.lower() for token in normalized.rstrip(")").split()]
+    if tokens and tokens[-1].strip(".,:;!?") in {
+        "and",
+        "or",
+        "but",
+        "with",
+        "without",
+        "for",
+        "to",
+        "from",
+        "of",
+        "in",
+        "on",
+        "by",
+        "when",
+        "while",
+        "because",
+        "that",
+        "which",
+        "who",
+    }:
+        return None
+    return f"{normalized}."

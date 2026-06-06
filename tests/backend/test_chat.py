@@ -2,19 +2,23 @@ import asyncio
 import uuid
 from types import SimpleNamespace
 
-from app.services.answer_generation import GroundedGenerationRequest
+from app.services.answer_generation import GroundedGenerationRequest, GroundedGenerationResult
 from app.services.chat_service import GroundedChatService
 from app.services.document_models import SearchResult, SourceChunk
 
 
 class RecordingAnswerGenerator:
-    def __init__(self, response_text: str) -> None:
+    def __init__(self, response_text: str, used_evidence_indices: list[int] | None = None) -> None:
         self.response_text = response_text
+        self.used_evidence_indices = used_evidence_indices
         self.requests: list[GroundedGenerationRequest] = []
 
-    async def generate(self, request: GroundedGenerationRequest) -> str:
+    async def generate(self, request: GroundedGenerationRequest) -> GroundedGenerationResult:
         self.requests.append(request)
-        return self.response_text
+        return GroundedGenerationResult(
+            content=self.response_text,
+            used_evidence_indices=self.used_evidence_indices,
+        )
 
 
 class EmptyRetrievalService:
@@ -63,9 +67,7 @@ def test_chat_endpoint_creates_session_and_grounded_reply(client):
     assert body["data"]["messages"][0]["role"] == "user"
     assert body["data"]["messages"][0]["content"] == "Summarize the policy."
     assert body["data"]["messages"][1]["role"] == "assistant"
-    assert "Based on the processed documents" in body["data"]["messages"][1]["content"]
-    assert "Supporting evidence:" in body["data"]["messages"][1]["content"]
-    assert "Sources:" in body["data"]["messages"][1]["content"]
+    assert body["data"]["messages"][1]["content"] == "PTO carryover policy allows forty hours of unused vacation."
     assert body["data"]["messages"][1]["citations"]
     assert body["data"]["messages"][1]["citations"][0]["title"] == "policy.txt"
 
@@ -202,9 +204,9 @@ def test_chat_grounds_answer_across_multiple_completed_documents_with_stable_cit
     body = response.json()["data"]
     assistant_message = body["messages"][1]
     assert assistant_message["role"] == "assistant"
-    assert "Based on the processed documents" in assistant_message["content"]
-    assert "Supporting evidence:" not in assistant_message["content"]
-    assert "Sources:" not in assistant_message["content"]
+    assert "forty hours of unused vacation" in assistant_message["content"]
+    assert "emergency carryover exceptions" in assistant_message["content"]
+    assert assistant_message["content"].endswith(".")
     assert len(assistant_message["citations"]) >= 2
     assert assistant_message["citations"][0]["chunk_id"]
     assert {citation["title"] for citation in assistant_message["citations"]}.issuperset(
@@ -276,9 +278,8 @@ def test_chat_preserves_multi_document_citations_for_synthesis_answers(client):
 
     assert response.status_code == 202
     assistant_message = response.json()["data"]["messages"][1]
-    assert "Based on the processed documents" in assistant_message["content"]
-    assert "Supporting evidence:" not in assistant_message["content"]
-    assert "Sources:" not in assistant_message["content"]
+    assert "forty hours of unused vacation" in assistant_message["content"]
+    assert "emergency carryover exceptions" in assistant_message["content"]
     assert {citation["title"] for citation in assistant_message["citations"]} == {
         "pto-policy.txt",
         "manager-exceptions.txt",
@@ -378,7 +379,7 @@ def test_redundant_retrieval_candidates_do_not_leak_into_chat_citations(client):
 
 
 def test_grounded_chat_uses_model_generation_with_selected_evidence_only():
-    generator = RecordingAnswerGenerator("Model-backed grounded answer.")
+    generator = RecordingAnswerGenerator("Model-backed grounded answer.", used_evidence_indices=[0])
     retrieval_service = StaticRetrievalService(
         [
             _search_result("chunk-1", "outline.txt", "REFT presentation outline: 30 minutes total.", score=1.0),
@@ -445,7 +446,7 @@ Built document ingestion pipelines and retrieval services.
         )
     )
 
-    assert reply.content == "Skills: Python, FastAPI, PostgreSQL, Docker, Redis, SQLAlchemy, REST APIs."
+    assert reply.content == "Python, FastAPI, PostgreSQL, Docker, Redis, SQLAlchemy, REST APIs."
     assert not reply.content.startswith("Nijat Hasanov")
     assert not reply.content.endswith("...")
     assert [citation.title for citation in reply.citations] == ["Nijat_CV.pdf"]
@@ -473,7 +474,7 @@ def test_chat_reranker_selects_cv_skills_chunk_over_noisy_header_candidate():
         )
     )
 
-    assert reply.content == "Skills: Python, FastAPI, PostgreSQL, Docker, Redis, SQLAlchemy, REST APIs."
+    assert reply.content == "Python, FastAPI, PostgreSQL, Docker, Redis, SQLAlchemy, REST APIs."
     assert [citation.chunk_id for citation in reply.citations] == ["skills"]
 
 
@@ -556,5 +557,149 @@ def test_final_answer_strips_artificial_ellipsis_from_model_output():
         )
     )
 
-    assert reply.content == "Skills: Python, FastAPI, PostgreSQL."
+    assert reply.content == "Python, FastAPI, PostgreSQL."
     assert not reply.content.endswith("...")
+
+
+def test_definition_answer_ends_as_complete_sentence():
+    service = GroundedChatService(
+        StaticRetrievalService(
+            [
+                _search_result(
+                    "definition",
+                    "glossary.txt",
+                    "A service account is a non-human account used by applications or automation to access systems.",
+                    score=1.0,
+                )
+            ]
+        )
+    )
+
+    reply = asyncio.run(
+        service.generate_reply(
+            session=SimpleNamespace(workspace_id=None),
+            user_message=SimpleNamespace(content="What is a service account?"),
+        )
+    )
+
+    assert reply.content == "A service account is a non-human account used by applications or automation to access systems."
+    assert [citation.title for citation in reply.citations] == ["glossary.txt"]
+
+
+def test_incomplete_model_answer_falls_back_to_complete_factual_answer():
+    generator = RecordingAnswerGenerator("Employees may carry over up to 40 hours of")
+    service = GroundedChatService(
+        StaticRetrievalService(
+            [
+                _search_result(
+                    "policy",
+                    "vacation-policy.txt",
+                    "Employees may carry over up to 40 hours of unused vacation into the next quarter.",
+                    score=1.0,
+                )
+            ]
+        ),
+        answer_generator=generator,
+    )
+
+    reply = asyncio.run(
+        service.generate_reply(
+            session=SimpleNamespace(workspace_id=None),
+            user_message=SimpleNamespace(content="What vacation carryover is allowed?"),
+        )
+    )
+
+    assert reply.content == "Employees may carry over up to 40 hours of unused vacation into the next quarter."
+    assert [citation.title for citation in reply.citations] == ["vacation-policy.txt"]
+
+
+def test_synthesis_answer_stays_complete_without_boilerplate():
+    service = GroundedChatService(
+        StaticRetrievalService(
+            [
+                _search_result(
+                    "carryover",
+                    "vacation-policy.txt",
+                    "Employees may carry over up to 40 hours of unused vacation into the next quarter.",
+                    score=1.0,
+                ),
+                _search_result(
+                    "approval",
+                    "travel-policy.txt",
+                    "International travel requires director approval before any booking is confirmed.",
+                    score=0.9,
+                ),
+            ]
+        )
+    )
+
+    reply = asyncio.run(
+        service.generate_reply(
+            session=SimpleNamespace(workspace_id=None),
+            user_message=SimpleNamespace(
+                content="What vacation carryover is allowed, and what approval is needed for international travel?"
+            ),
+        )
+    )
+
+    assert "Based on the processed documents" not in reply.content
+    assert "Supporting evidence:" not in reply.content
+    assert "40 hours of unused vacation" in reply.content
+    assert "director approval" in reply.content
+    assert reply.content.endswith(".")
+
+
+def test_model_backed_answers_without_supported_usage_prune_citations():
+    generator = RecordingAnswerGenerator("Model-backed answer without attributable support.")
+    service = GroundedChatService(
+        StaticRetrievalService(
+            [
+                _search_result("policy", "vacation-policy.txt", "Vacation carryover is capped at 40 hours.", score=1.0),
+                _search_result("background", "background.txt", "Carryover was discussed in the 2025 planning notes.", score=0.7),
+            ]
+        ),
+        answer_generator=generator,
+    )
+
+    reply = asyncio.run(
+        service.generate_reply(
+            session=SimpleNamespace(workspace_id=None),
+            user_message=SimpleNamespace(content="How many hours can employees carry over?"),
+        )
+    )
+
+    assert reply.citations == []
+
+
+def test_model_backed_answers_keep_only_supported_citations():
+    generator = RecordingAnswerGenerator(
+        "Employees may carry over up to 40 hours of unused vacation into the next quarter."
+    )
+    service = GroundedChatService(
+        StaticRetrievalService(
+            [
+                _search_result(
+                    "policy",
+                    "vacation-policy.txt",
+                    "Employees may carry over up to 40 hours of unused vacation into the next quarter.",
+                    score=1.0,
+                ),
+                _search_result(
+                    "background",
+                    "background.txt",
+                    "Carryover was discussed in the annual planning notes.",
+                    score=0.7,
+                ),
+            ]
+        ),
+        answer_generator=generator,
+    )
+
+    reply = asyncio.run(
+        service.generate_reply(
+            session=SimpleNamespace(workspace_id=None),
+            user_message=SimpleNamespace(content="What vacation carryover is allowed?"),
+        )
+    )
+
+    assert [citation.title for citation in reply.citations] == ["vacation-policy.txt"]
