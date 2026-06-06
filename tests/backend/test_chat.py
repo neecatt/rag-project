@@ -382,7 +382,7 @@ def test_redundant_retrieval_candidates_do_not_leak_into_chat_citations(client):
 
 
 def test_grounded_chat_uses_model_generation_with_selected_evidence_only():
-    generator = RecordingAnswerGenerator("Model-backed grounded answer.")
+    generator = RecordingAnswerGenerator("Model-backed grounded answer.", used_evidence_indices=[0])
     retrieval_service = StaticRetrievalService(
         [
             _search_result("chunk-1", "outline.txt", "REFT presentation outline: 30 minutes total.", score=1.0),
@@ -404,6 +404,29 @@ def test_grounded_chat_uses_model_generation_with_selected_evidence_only():
     assert len(generator.requests) == 1
     assert len(generator.requests[0].evidence) == 1
     assert generator.requests[0].evidence[0].title == "outline.txt"
+
+
+def test_model_backed_answers_without_usage_signal_prune_citations_conservatively():
+    generator = RecordingAnswerGenerator("Model-backed grounded answer without attributable support.")
+    service = GroundedChatService(
+        StaticRetrievalService(
+            [
+                _search_result("policy", "vacation-policy.txt", "Vacation carryover is capped at 40 hours.", score=1.0),
+                _search_result("background", "background.txt", "Carryover was discussed in the 2025 planning notes.", score=0.7),
+            ]
+        ),
+        answer_generator=generator,
+    )
+
+    reply = asyncio.run(
+        service.generate_reply(
+            session=SimpleNamespace(workspace_id=None),
+            user_message=SimpleNamespace(content="How many hours can employees carry over?"),
+        )
+    )
+
+    assert reply.content == "Model-backed grounded answer without attributable support."
+    assert reply.citations == []
 
 
 def test_grounded_chat_fallback_when_no_evidence_found():
@@ -683,4 +706,36 @@ def test_model_backed_answers_only_return_citations_for_used_evidence():
     )
 
     assert reply.content == "40 hours."
+    assert [citation.title for citation in reply.citations] == ["vacation-policy.txt"]
+
+
+def test_model_backed_answers_can_infer_citation_usage_from_answer_text():
+    generator = RecordingAnswerGenerator("Employees may carry over up to 40 hours of unused vacation.")
+    service = GroundedChatService(
+        StaticRetrievalService(
+            [
+                _search_result(
+                    "policy",
+                    "vacation-policy.txt",
+                    "Employees may carry over up to 40 hours of unused vacation into the next quarter.",
+                    score=1.0,
+                ),
+                _search_result(
+                    "background",
+                    "background.txt",
+                    "Carryover rules were reviewed in the annual planning notes.",
+                    score=0.7,
+                ),
+            ]
+        ),
+        answer_generator=generator,
+    )
+
+    reply = asyncio.run(
+        service.generate_reply(
+            session=SimpleNamespace(workspace_id=None),
+            user_message=SimpleNamespace(content="What vacation carryover is allowed?"),
+        )
+    )
+
     assert [citation.title for citation in reply.citations] == ["vacation-policy.txt"]

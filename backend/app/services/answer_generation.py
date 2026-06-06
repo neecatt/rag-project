@@ -68,7 +68,7 @@ class OpenAICompatibleAnswerGenerator:
         )
         return GroundedGenerationResult(
             content=answer,
-            used_evidence_indices=list(range(len(request_payload.evidence))),
+            used_evidence_indices=None,
         )
 
 

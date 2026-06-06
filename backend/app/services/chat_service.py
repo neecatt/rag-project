@@ -44,20 +44,26 @@ class SelectedAnswer:
 class QuestionProfile:
     wants_summary: bool
     wants_comparison: bool
-    wants_list: bool
+    wants_structured_extraction: bool
     seeks_quantity: bool
+    segment_count: int
 
     @property
     def needs_synthesis(self) -> bool:
-        return self.wants_summary or self.wants_comparison
+        return self.wants_summary or self.wants_comparison or self.segment_count > 1
 
     @property
     def prefers_direct_answer(self) -> bool:
-        return not self.needs_synthesis and not self.wants_list
+        return not self.needs_synthesis and not self.wants_structured_extraction
+
+    @property
+    def needs_expanded_context(self) -> bool:
+        return self.wants_summary or self.wants_structured_extraction or self.segment_count > 1
 
     @classmethod
     def from_question(cls, question: str) -> QuestionProfile:
         lowered = question.lower()
+        segment_count = len([segment for segment in re.split(r"\?|,|\band\b|\bbut\b|\bor\b", lowered) if segment.strip()]) or 1
         wants_summary = any(
             keyword in lowered
             for keyword in {"summarize", "summary", "overview", "review", "explain"}
@@ -65,31 +71,19 @@ class QuestionProfile:
         wants_comparison = any(
             keyword in lowered
             for keyword in {"compare", "difference", "different", "versus", "pros and cons"}
-        ) or bool(re.search(r"\b(and|both|together)\b", lowered))
-        wants_list = any(
-            keyword in lowered
-            for keyword in {
-                "list",
-                "name",
-                "identify",
-                "which",
-                "what are",
-                "tell me the",
-                "extract",
-                "skill",
-                "skills",
-                "tool",
-                "tools",
-                "technology",
-                "technologies",
-            }
+        )
+        wants_structured_extraction = (
+            lowered.startswith(("list ", "name ", "identify ", "extract "))
+            or "what are" in lowered
+            or "tell me" in lowered
         )
         seeks_quantity = lowered.startswith("how many") or lowered.startswith("how much") or "how long" in lowered
         return cls(
             wants_summary=wants_summary,
             wants_comparison=wants_comparison,
-            wants_list=wants_list,
+            wants_structured_extraction=wants_structured_extraction,
             seeks_quantity=seeks_quantity,
+            segment_count=segment_count,
         )
 
 
@@ -262,7 +256,7 @@ class HeuristicFallbackAnswerGenerator:
         profile = QuestionProfile.from_question(request.question)
 
         list_answer = None
-        if profile.wants_list:
+        if profile.wants_structured_extraction:
             list_answer = self._extract_list_answer(question=request.question, evidence_items=request.evidence)
         if list_answer is not None:
             return GroundedGenerationResult(
@@ -643,6 +637,8 @@ class GroundedChatService:
         )
         used_indices = self._resolve_used_evidence_indices(
             generation_result.used_evidence_indices,
+            answer=normalized_answer,
+            evidence=generation_request.evidence,
             evidence_count=len(selected_evidence),
         )
         return ChatReply(
@@ -651,32 +647,9 @@ class GroundedChatService:
         )
 
     def _generation_context(self, *, question: str, evidence: SelectedEvidence) -> str:
-        if self._needs_expanded_context(question):
+        if QuestionProfile.from_question(question).needs_expanded_context:
             return self._trim_context(evidence.result.chunk.text, limit=5000)
         return evidence.best_sentence or self._trim_context(evidence.result.chunk.text, limit=1200)
-
-    def _needs_expanded_context(self, question: str) -> bool:
-        lowered = question.lower()
-        return any(
-            keyword in lowered
-            for keyword in {
-                "review",
-                "extract",
-                "summarize",
-                "summary",
-                "list",
-                "name",
-                "identify",
-                "which",
-                "what are",
-                "compare",
-                "skills",
-                "experience",
-                "education",
-                "resume",
-                "cv",
-            }
-        )
 
     def _trim_context(self, text: str, *, limit: int) -> str:
         if len(text) <= limit:
@@ -694,10 +667,63 @@ class GroundedChatService:
                 normalized = f"{normalized}."
         return normalized
 
-    def _resolve_used_evidence_indices(self, indices: list[int] | None, *, evidence_count: int) -> list[int]:
+    def _resolve_used_evidence_indices(
+        self,
+        indices: list[int] | None,
+        *,
+        answer: str,
+        evidence: list[GroundedGenerationEvidence],
+        evidence_count: int,
+    ) -> list[int]:
         if evidence_count <= 0:
             return []
-        if not indices:
-            return list(range(evidence_count))
-        resolved = [index for index in indices if 0 <= index < evidence_count]
-        return resolved or [0]
+        if indices is not None:
+            resolved = [index for index in indices if 0 <= index < evidence_count]
+            return resolved or [0]
+        return self._infer_used_evidence_indices(answer=answer, evidence=evidence)
+
+    def _infer_used_evidence_indices(self, *, answer: str, evidence: list[GroundedGenerationEvidence]) -> list[int]:
+        answer_terms = set(_tokenize(answer))
+        if not answer_terms:
+            return []
+
+        scored_matches: list[tuple[int, float]] = []
+        for index, item in enumerate(evidence):
+            content_terms = set(_tokenize(item.content))
+            if not content_terms:
+                continue
+
+            overlap = answer_terms & content_terms
+            coverage = len(overlap) / max(len(answer_terms), 1)
+            density = len(overlap) / max(len(content_terms), 1)
+            sentence_match = 1.0 if self._answer_sentence_supported(answer, item.content) else 0.0
+            score = (1.5 * coverage) + density + sentence_match
+            if sentence_match or coverage >= 0.45 or (coverage >= 0.25 and len(overlap) >= 3):
+                scored_matches.append((index, score))
+
+        if not scored_matches:
+            return []
+
+        scored_matches.sort(key=lambda item: (item[1], -item[0]), reverse=True)
+        best_score = scored_matches[0][1]
+        kept = [
+            index
+            for index, score in scored_matches
+            if score >= max(0.9, best_score - 0.35)
+        ]
+        return kept[:2]
+
+    def _answer_sentence_supported(self, answer: str, evidence_content: str) -> bool:
+        normalized_answer = " ".join(answer.split()).lower().strip(" .")
+        if not normalized_answer:
+            return False
+
+        evidence_sentences = [
+            " ".join(sentence.split()).lower().strip(" .")
+            for sentence in re.split(r"(?<=[.!?])\s+|\n+", evidence_content)
+            if sentence.strip()
+        ]
+        return any(
+            normalized_answer in sentence or sentence in normalized_answer
+            for sentence in evidence_sentences
+        )
