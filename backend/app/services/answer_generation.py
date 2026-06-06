@@ -24,15 +24,21 @@ class GroundedGenerationRequest:
     evidence: list[GroundedGenerationEvidence]
 
 
+@dataclass(slots=True)
+class GroundedGenerationResult:
+    content: str
+    used_evidence_indices: list[int] | None = None
+
+
 class AnswerGenerator(Protocol):
-    async def generate(self, request: GroundedGenerationRequest) -> str: ...
+    async def generate(self, request: GroundedGenerationRequest) -> GroundedGenerationResult: ...
 
 
 class OpenAICompatibleAnswerGenerator:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
 
-    async def generate(self, request_payload: GroundedGenerationRequest) -> str:
+    async def generate(self, request_payload: GroundedGenerationRequest) -> GroundedGenerationResult:
         body = {
             "model": self._settings.chat_answer_model,
             "temperature": 0,
@@ -41,11 +47,10 @@ class OpenAICompatibleAnswerGenerator:
                     "role": "system",
                     "content": (
                         "Answer using only the provided evidence. "
-                        "Be concise by default. "
-                        "If one evidence passage is sufficient, answer directly in one short sentence. "
-                        "For document review, extraction, resume, CV, skills, experience, or education tasks, "
-                        "extract and organize the requested facts instead of repeating the beginning of the document. "
-                        "If multiple passages are needed, synthesize briefly without inventing facts. "
+                        "For narrow factual questions, answer directly in one short sentence when possible. "
+                        "For synthesis, comparison, or summary questions, answer in two to four concise sentences that cover the needed points. "
+                        "Use only the evidence that is necessary for the answer, and do not add generic preambles, source lists, or unsupported filler. "
+                        "If the evidence contains labeled fields, sections, or lists that answer the question, extract only the relevant facts. "
                         "If the evidence is insufficient, say so plainly."
                     ),
                 },
@@ -55,11 +60,15 @@ class OpenAICompatibleAnswerGenerator:
                 },
             ],
         }
-        return await _run_blocking_http_json(
+        answer = await _run_blocking_http_json(
             url=str(self._settings.chat_answer_base_url),
             api_key=self._settings.chat_answer_api_key or "",
             timeout_seconds=self._settings.chat_answer_timeout_seconds,
             body=body,
+        )
+        return GroundedGenerationResult(
+            content=answer,
+            used_evidence_indices=list(range(len(request_payload.evidence))),
         )
 
 
@@ -75,15 +84,18 @@ class ConfigurableAnswerGenerator:
         ):
             self._live_generator = OpenAICompatibleAnswerGenerator(settings)
 
-    async def generate(self, request: GroundedGenerationRequest) -> str:
+    async def generate(self, request: GroundedGenerationRequest) -> GroundedGenerationResult:
         if self._live_generator is None:
             return await self._fallback_generator.generate(request)
 
         try:
-            answer = await self._live_generator.generate(request)
-            normalized = " ".join(answer.split()).strip()
+            result = await self._live_generator.generate(request)
+            normalized = " ".join(result.content.split()).strip()
             if normalized:
-                return normalized
+                return GroundedGenerationResult(
+                    content=normalized,
+                    used_evidence_indices=result.used_evidence_indices,
+                )
         except Exception:
             logger.exception("grounded answer model call failed; falling back to local generator")
         return await self._fallback_generator.generate(request)
