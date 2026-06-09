@@ -41,53 +41,6 @@ class SelectedAnswer:
 
 
 @dataclass(slots=True)
-class QuestionProfile:
-    wants_summary: bool
-    wants_comparison: bool
-    wants_structured_extraction: bool
-    seeks_quantity: bool
-    segment_count: int
-
-    @property
-    def needs_synthesis(self) -> bool:
-        return self.wants_summary or self.wants_comparison or self.segment_count > 1
-
-    @property
-    def prefers_direct_answer(self) -> bool:
-        return not self.needs_synthesis and not self.wants_structured_extraction
-
-    @property
-    def needs_expanded_context(self) -> bool:
-        return self.wants_summary or self.wants_structured_extraction or self.segment_count > 1
-
-    @classmethod
-    def from_question(cls, question: str) -> QuestionProfile:
-        lowered = question.lower()
-        segment_count = len([segment for segment in re.split(r"\?|,|\band\b|\bbut\b|\bor\b", lowered) if segment.strip()]) or 1
-        wants_summary = any(
-            keyword in lowered
-            for keyword in {"summarize", "summary", "overview", "review", "explain"}
-        )
-        wants_comparison = any(
-            keyword in lowered
-            for keyword in {"compare", "difference", "different", "versus", "pros and cons"}
-        )
-        wants_structured_extraction = (
-            lowered.startswith(("list ", "name ", "identify ", "extract "))
-            or "what are" in lowered
-            or "tell me" in lowered
-        )
-        seeks_quantity = lowered.startswith("how many") or lowered.startswith("how much") or "how long" in lowered
-        return cls(
-            wants_summary=wants_summary,
-            wants_comparison=wants_comparison,
-            wants_structured_extraction=wants_structured_extraction,
-            seeks_quantity=seeks_quantity,
-            segment_count=segment_count,
-        )
-
-
-@dataclass(slots=True)
 class AnswerDraft:
     content: str
     used_evidence_indices: list[int]
@@ -217,9 +170,9 @@ class GroundedEvidenceSelector:
         return ":" in text or "-" in text
 
     def _best_sentence(self, question: str, text: str) -> str:
-        sentences = [segment.strip() for segment in re.split(r"(?<=[.!?])\s+|\n+", " ".join(text.split())) if segment.strip()]
+        sentences = _split_text_units(text)
         if not sentences:
-            return self._trim_text(text, limit=220)
+            return _normalize_complete_text(text)
 
         query_terms = set(_tokenize(question))
         ranked = sorted(
@@ -230,20 +183,13 @@ class GroundedEvidenceSelector:
             ),
             reverse=True,
         )
-        return self._trim_text(ranked[0], limit=220)
+        return _normalize_complete_text(ranked[0])
 
     def _sentence_overlap_score(self, sentence: str, query_terms: set[str]) -> int:
         if not query_terms:
             return len(_tokenize(sentence))
         sentence_terms = set(_tokenize(sentence))
         return len(sentence_terms & query_terms)
-
-    def _trim_text(self, text: str, *, limit: int) -> str:
-        normalized_text = " ".join(text.split())
-        if len(normalized_text) <= limit:
-            return normalized_text
-        return f"{normalized_text[: limit - 3].rstrip()}..."
-
 
 class HeuristicFallbackAnswerGenerator:
     async def generate(self, request: GroundedGenerationRequest) -> GroundedGenerationResult:
@@ -253,51 +199,34 @@ class HeuristicFallbackAnswerGenerator:
                 used_evidence_indices=[],
             )
 
-        profile = QuestionProfile.from_question(request.question)
+        structured = self._extract_structured_answer(question=request.question, evidence_items=request.evidence)
+        if structured is not None:
+            return GroundedGenerationResult(content=structured.content, used_evidence_indices=structured.used_evidence_indices)
 
-        list_answer = None
-        if profile.wants_structured_extraction:
-            list_answer = self._extract_list_answer(question=request.question, evidence_items=request.evidence)
-        if list_answer is not None:
-            return GroundedGenerationResult(
-                content=list_answer.content,
-                used_evidence_indices=list_answer.used_evidence_indices,
-            )
+        seeks_quantity = _question_seeks_quantity(request.question)
 
-        if len(request.evidence) == 1 and profile.prefers_direct_answer:
-            direct_answer = self._direct_answer(
-                question=request.question,
-                evidence=request.evidence[0],
-                seeks_quantity=profile.seeks_quantity,
-            )
-            if direct_answer:
-                return GroundedGenerationResult(content=direct_answer, used_evidence_indices=[0])
+        if len(request.evidence) == 1:
+            direct = self._direct_answer(question=request.question, evidence=request.evidence[0], seeks_quantity=seeks_quantity)
+            if direct:
+                return GroundedGenerationResult(content=direct, used_evidence_indices=[0])
 
-        if profile.prefers_direct_answer:
-            direct_multi = self._direct_multi_evidence_answer(
-                question=request.question,
-                evidence_items=request.evidence,
-                seeks_quantity=profile.seeks_quantity,
-            )
-            if direct_multi is not None:
-                return GroundedGenerationResult(
-                    content=direct_multi.content,
-                    used_evidence_indices=direct_multi.used_evidence_indices,
-                )
+        direct_multi = self._direct_multi_evidence_answer(
+            question=request.question,
+            evidence_items=request.evidence,
+            seeks_quantity=seeks_quantity,
+        )
+        if direct_multi is not None:
+            return GroundedGenerationResult(content=direct_multi.content, used_evidence_indices=direct_multi.used_evidence_indices)
 
         synthesis = self._synthesis_answer(
             question=request.question,
             evidence_items=request.evidence,
-            max_sentences=3 if profile.needs_synthesis or len(request.evidence) > 1 else 2,
+            max_units=min(3, max(2, len(request.evidence))),
         )
         if synthesis is not None:
-            return GroundedGenerationResult(
-                content=synthesis.content,
-                used_evidence_indices=synthesis.used_evidence_indices,
-            )
+            return GroundedGenerationResult(content=synthesis.content, used_evidence_indices=synthesis.used_evidence_indices)
 
-        fallback = self._trim_text(request.evidence[0].content, limit=160)
-        return GroundedGenerationResult(content=fallback, used_evidence_indices=[0])
+        return GroundedGenerationResult(content=_normalize_complete_text(request.evidence[0].content), used_evidence_indices=[0])
 
     def _direct_answer(
         self,
@@ -306,7 +235,7 @@ class HeuristicFallbackAnswerGenerator:
         evidence: GroundedGenerationEvidence,
         seeks_quantity: bool,
     ) -> str | None:
-        sentence = self._trim_text(evidence.content, limit=220)
+        sentence = self._best_complete_unit(question=question, text=evidence.content)
         if not sentence:
             return None
 
@@ -318,13 +247,11 @@ class HeuristicFallbackAnswerGenerator:
         if labeled_answer:
             return labeled_answer
 
-        if len(sentence) <= 120:
-            if sentence.endswith((".", "!", "?")):
-                return sentence
-            return f"{sentence}."
+        if len(sentence) <= 160:
+            return _normalize_complete_text(sentence)
         return None
 
-    def _extract_list_answer(
+    def _extract_structured_answer(
         self,
         *,
         question: str,
@@ -339,51 +266,29 @@ class HeuristicFallbackAnswerGenerator:
             for line_index, line in enumerate(lines):
                 label, inline_value = self._split_label(line)
                 if label and self._line_matches_question(label, salient_terms):
-                    values = self._parse_list_items(inline_value)
+                    values = self._parse_structured_items(inline_value)
                     if not values and line_index + 1 < len(lines):
-                        values = self._parse_list_items(lines[line_index + 1])
-                    if values:
-                        return AnswerDraft(content=self._format_list_answer(values), used_evidence_indices=[index])
+                        values = self._parse_structured_items(lines[line_index + 1])
+                    if len(values) >= 2:
+                        return AnswerDraft(content=self._format_structured_answer(values), used_evidence_indices=[index])
                 if not label and self._line_matches_question(line, salient_terms) and line_index + 1 < len(lines):
-                    values = self._parse_list_items(lines[line_index + 1])
+                    values = self._parse_structured_items(lines[line_index + 1])
                     if len(values) >= 3:
-                        return AnswerDraft(content=self._format_list_answer(values), used_evidence_indices=[index])
-
-            labeled_values = self._extract_matching_labeled_lists(evidence.content, salient_terms)
-            if labeled_values:
-                return AnswerDraft(content=self._format_list_answer(labeled_values), used_evidence_indices=[index])
-
+                        return AnswerDraft(content=self._format_structured_answer(values), used_evidence_indices=[index])
         return None
 
-    def _extract_matching_labeled_lists(self, text: str, salient_terms: set[str]) -> list[str]:
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-        for line in lines:
-            label, inline_value = self._split_label(line)
-            if label and self._line_matches_question(label, salient_terms):
-                values = self._parse_list_items(inline_value)
-                if values:
-                    return values
-        return []
-
-    def _parse_list_items(self, text: str) -> list[str]:
+    def _parse_structured_items(self, text: str) -> list[str]:
         normalized = re.sub(r"^[A-Za-z][A-Za-z /&+-]{1,60}:\s*", "", text.strip())
-        normalized = re.sub(
-            r"^[A-Za-z][A-Za-z /&+-]{1,60}\s+(?=[A-Za-z0-9][^,]{0,40},\s*[A-Za-z0-9])",
-            "",
-            normalized,
-        )
         pieces = re.split(r",|;|\||\u2022|\n|\s+-\s+", normalized)
         values: list[str] = []
         for piece in pieces:
             cleaned = " ".join(piece.strip(" .:-").split())
-            if not cleaned or len(cleaned) > 60:
-                continue
-            if len(cleaned.split()) > 6:
+            if not cleaned or len(cleaned) > 60 or len(cleaned.split()) > 6:
                 continue
             values.append(cleaned)
         return self._dedupe_preserving_order(values)
 
-    def _format_list_answer(self, values: list[str]) -> str:
+    def _format_structured_answer(self, values: list[str]) -> str:
         return f"{', '.join(values[:8])}."
 
     def _dedupe_preserving_order(self, values: list[str]) -> list[str]:
@@ -442,9 +347,9 @@ class HeuristicFallbackAnswerGenerator:
     ) -> AnswerDraft | None:
         direct_answers: list[tuple[int, str]] = []
         for index, evidence in enumerate(evidence_items[:2]):
-            direct_answer = self._direct_answer(question=question, evidence=evidence, seeks_quantity=seeks_quantity)
-            if direct_answer:
-                direct_answers.append((index, direct_answer))
+            direct = self._direct_answer(question=question, evidence=evidence, seeks_quantity=seeks_quantity)
+            if direct:
+                direct_answers.append((index, direct))
 
         if direct_answers:
             first_index, first_answer = direct_answers[0]
@@ -457,64 +362,80 @@ class HeuristicFallbackAnswerGenerator:
         *,
         question: str,
         evidence_items: list[GroundedGenerationEvidence],
-        max_sentences: int,
+        max_units: int,
     ) -> AnswerDraft | None:
-        statements: list[tuple[int, str]] = []
+        candidates: list[tuple[int, str]] = []
         for index, evidence in enumerate(evidence_items[:3]):
-            limit = 2 if len(evidence_items) == 1 else 1
-            for statement in self._best_statements(question=question, text=evidence.content, limit=limit):
-                statements.append((index, statement))
+            limit = 1 if len(evidence_items) > 1 else 2
+            for unit in self._best_supporting_units(question=question, text=evidence.content, limit=limit):
+                candidates.append((index, unit))
 
-        deduped: list[tuple[int, str]] = []
-        seen_normalized: set[str] = set()
-        for index, statement in statements:
-            normalized = statement.lower()
-            if normalized in seen_normalized:
+        selected: list[tuple[int, str]] = []
+        seen: set[str] = set()
+        for index, unit in candidates:
+            normalized = unit.lower()
+            if normalized in seen:
                 continue
-            seen_normalized.add(normalized)
-            deduped.append((index, statement))
-            if len(deduped) >= max_sentences:
+            seen.add(normalized)
+            selected.append((index, unit))
+            if len(selected) >= max_units:
                 break
 
-        if not deduped:
+        if not selected:
             return None
 
-        content = " ".join(statement for _, statement in deduped)
         return AnswerDraft(
-            content=self._trim_text(content, limit=320),
-            used_evidence_indices=self._dedupe_indices(index for index, _ in deduped),
+            content=" ".join(unit for _, unit in selected),
+            used_evidence_indices=self._dedupe_indices(index for index, _ in selected),
         )
 
-    def _best_statements(self, *, question: str, text: str, limit: int) -> list[str]:
-        sentences = [segment.strip() for segment in re.split(r"(?<=[.!?])\s+|\n+", " ".join(text.split())) if segment.strip()]
-        if not sentences:
-            trimmed = self._trim_text(text, limit=180)
-            return [trimmed] if trimmed else []
+    def _best_supporting_units(self, *, question: str, text: str, limit: int) -> list[str]:
+        units = _split_text_units(text)
+        if not units:
+            return []
 
         query_terms = set(_tokenize(question))
         ranked = sorted(
-            sentences,
-            key=lambda sentence: (
-                self._sentence_overlap_score(sentence, query_terms),
-                self._contains_concrete_fact(sentence),
-                -abs(len(sentence) - 120),
+            units,
+            key=lambda unit: (
+                self._sentence_overlap_score(unit, query_terms),
+                self._contains_concrete_fact(unit),
+                -abs(len(unit) - 120),
             ),
             reverse=True,
         )
+
         selected: list[str] = []
-        for sentence in ranked:
-            trimmed = self._trim_text(sentence, limit=180)
-            if not trimmed or trimmed in selected:
+        for unit in ranked:
+            completed = _normalize_complete_text(unit)
+            if not completed or completed in selected:
                 continue
-            selected.append(trimmed if trimmed.endswith((".", "!", "?")) else f"{trimmed}.")
+            selected.append(completed)
             if len(selected) >= limit:
                 break
         return selected
 
-    def _sentence_overlap_score(self, sentence: str, query_terms: set[str]) -> int:
+    def _sentence_overlap_score(self, unit: str, query_terms: set[str]) -> int:
         if not query_terms:
-            return len(_tokenize(sentence))
-        return len(set(_tokenize(sentence)) & query_terms)
+            return len(_tokenize(unit))
+        return len(set(_tokenize(unit)) & query_terms)
+
+    def _best_complete_unit(self, *, question: str, text: str) -> str:
+        units = _split_text_units(text)
+        if not units:
+            return _normalize_complete_text(text)
+
+        query_terms = set(_tokenize(question))
+        ranked = sorted(
+            units,
+            key=lambda unit: (
+                self._sentence_overlap_score(unit, query_terms),
+                self._contains_concrete_fact(unit),
+                -abs(len(unit) - 120),
+            ),
+            reverse=True,
+        )
+        return _normalize_complete_text(ranked[0])
 
     def _contains_concrete_fact(self, text: str) -> bool:
         if re.search(r"\b\d+\b", text):
@@ -523,28 +444,9 @@ class HeuristicFallbackAnswerGenerator:
 
     def _salient_terms(self, question: str) -> set[str]:
         ignored = {
-            "what",
-            "which",
-            "tell",
-            "give",
-            "list",
-            "name",
-            "identify",
-            "extract",
-            "show",
-            "about",
-            "from",
-            "does",
-            "the",
-            "this",
-            "that",
-            "with",
-            "and",
-            "for",
-            "are",
-            "his",
-            "her",
-            "their",
+            "what", "which", "tell", "give", "list", "name", "identify", "extract",
+            "show", "about", "from", "does", "the", "this", "that", "with",
+            "and", "for", "are", "can", "should",
         }
         return {term for term in _tokenize(question) if term not in ignored and len(term) > 2}
 
@@ -552,10 +454,10 @@ class HeuristicFallbackAnswerGenerator:
         if ":" not in line:
             return None, line
         label, value = line.split(":", 1)
-        cleaned_label = label.strip()
-        if not cleaned_label or len(cleaned_label) > 60:
+        cleaned = label.strip()
+        if not cleaned or len(cleaned) > 60:
             return None, line
-        return cleaned_label, value.strip()
+        return cleaned, value.strip()
 
     def _line_matches_question(self, line: str, salient_terms: set[str]) -> bool:
         return bool(set(_tokenize(line)) & salient_terms)
@@ -569,15 +471,6 @@ class HeuristicFallbackAnswerGenerator:
             seen.add(index)
             deduped.append(index)
         return deduped
-
-    def _trim_text(self, text: str, *, limit: int) -> str:
-        normalized_text = " ".join(text.split())
-        if len(normalized_text) <= limit:
-            return normalized_text
-        truncated = normalized_text[:limit].rsplit(" ", 1)[0].strip()
-        if not truncated:
-            truncated = normalized_text[:limit].strip()
-        return truncated.rstrip(".") + "."
 
 
 class GroundedChatService:
@@ -594,9 +487,10 @@ class GroundedChatService:
         self._settings = settings or get_settings()
         self._evidence_selector = evidence_selector or GroundedEvidenceSelector()
         self._reranker = reranker or DeterministicReranker()
+        self._completion_fallback = HeuristicFallbackAnswerGenerator()
         self._answer_generator = answer_generator or ConfigurableAnswerGenerator(
             self._settings,
-            fallback_generator=HeuristicFallbackAnswerGenerator(),
+            fallback_generator=self._completion_fallback,
         )
 
     async def generate_reply(
@@ -626,19 +520,21 @@ class GroundedChatService:
                 GroundedGenerationEvidence(
                     title=item.result.chunk.document_title or "Untitled Document",
                     locator=item.result.chunk.locator(),
-                    content=self._generation_context(question=user_message.content, evidence=item),
+                    content=self._generation_context(evidence=item),
                 )
                 for item in selected_evidence
             ],
         )
         generation_result = await self._answer_generator.generate(generation_request)
-        normalized_answer = self._normalize_answer(generation_result.content, generation_request.evidence) or (
-            "I could not find a grounded answer in the processed documents for that question."
-        )
+        normalized_answer = self._normalize_answer(generation_result.content)
+        if not normalized_answer:
+            generation_result = await self._completion_fallback.generate(generation_request)
+            normalized_answer = self._normalize_answer(generation_result.content)
+        if not normalized_answer:
+            normalized_answer = "I could not find a grounded answer in the processed documents for that question."
+
         used_indices = self._resolve_used_evidence_indices(
             generation_result.used_evidence_indices,
-            answer=normalized_answer,
-            evidence=generation_request.evidence,
             evidence_count=len(selected_evidence),
         )
         return ChatReply(
@@ -646,84 +542,98 @@ class GroundedChatService:
             citations=[selected_evidence[index].result.chunk.to_citation() for index in used_indices],
         )
 
-    def _generation_context(self, *, question: str, evidence: SelectedEvidence) -> str:
-        if QuestionProfile.from_question(question).needs_expanded_context:
+    def _generation_context(self, *, evidence: SelectedEvidence) -> str:
+        if self._evidence_needs_expanded_context(evidence):
             return self._trim_context(evidence.result.chunk.text, limit=5000)
         return evidence.best_sentence or self._trim_context(evidence.result.chunk.text, limit=1200)
+
+    def _evidence_needs_expanded_context(self, evidence: SelectedEvidence) -> bool:
+        text = evidence.result.chunk.text
+        if "\n" in text:
+            return True
+        return len(_split_text_units(text)) > 1
 
     def _trim_context(self, text: str, *, limit: int) -> str:
         if len(text) <= limit:
             return text
-        trimmed = text[:limit].rsplit("\n", 1)[0].strip()
-        if len(trimmed) < limit * 0.5:
-            trimmed = text[:limit].rsplit(" ", 1)[0].strip()
+        trimmed = _trim_to_complete_unit(text, limit=limit)
         return trimmed or text[:limit].strip()
 
-    def _normalize_answer(self, answer: str, evidence: list[GroundedGenerationEvidence]) -> str:
-        normalized = " ".join(answer.split()).strip()
-        if normalized.endswith("...") and not any("..." in item.content for item in evidence):
-            normalized = normalized.rstrip(".").rstrip()
-            if normalized:
-                normalized = f"{normalized}."
+    def _normalize_answer(self, answer: str) -> str:
+        return _normalize_complete_text(answer)
+
+    def _resolve_used_evidence_indices(self, indices: list[int] | None, *, evidence_count: int) -> list[int]:
+        if evidence_count <= 0 or indices is None:
+            return []
+        resolved = [index for index in indices if 0 <= index < evidence_count]
+        return resolved
+
+
+def _split_text_units(text: str) -> list[str]:
+    return [
+        " ".join(segment.split()).strip()
+        for segment in re.split(r"(?<=[.!?])\s+|\n+", text)
+        if segment.strip()
+    ]
+
+
+def _first_complete_unit(text: str) -> str:
+    units = _split_text_units(text)
+    if not units:
+        return _normalize_complete_text(text)
+    return _normalize_complete_text(units[0])
+
+
+def _trim_to_complete_unit(text: str, *, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+
+    candidate = text[:limit]
+    punctuation_positions = [candidate.rfind(marker) for marker in (". ", "! ", "? ", ".\n", "!\n", "?\n")]
+    last_punctuation = max(punctuation_positions)
+    if last_punctuation >= 0:
+        return candidate[: last_punctuation + 1].strip()
+
+    line_break = candidate.rfind("\n")
+    if line_break >= 0:
+        return candidate[:line_break].strip()
+
+    return candidate.rsplit(" ", 1)[0].strip()
+
+
+def _normalize_complete_text(text: str) -> str:
+    normalized = " ".join(text.split()).strip()
+    if not normalized or normalized.endswith("..."):
+        return ""
+    if normalized[-1] in ",:;-/(":
+        return ""
+    tokens = [token.lower().strip(".,:;!?") for token in normalized.rstrip(")").split()]
+    if tokens and tokens[-1] in {
+        "and",
+        "or",
+        "but",
+        "with",
+        "without",
+        "for",
+        "to",
+        "from",
+        "of",
+        "in",
+        "on",
+        "by",
+        "when",
+        "while",
+        "because",
+        "that",
+        "which",
+        "who",
+    }:
+        return ""
+    if normalized[-1] in ".!?":
         return normalized
+    return f"{normalized}."
 
-    def _resolve_used_evidence_indices(
-        self,
-        indices: list[int] | None,
-        *,
-        answer: str,
-        evidence: list[GroundedGenerationEvidence],
-        evidence_count: int,
-    ) -> list[int]:
-        if evidence_count <= 0:
-            return []
-        if indices is not None:
-            resolved = [index for index in indices if 0 <= index < evidence_count]
-            return resolved or [0]
-        return self._infer_used_evidence_indices(answer=answer, evidence=evidence)
 
-    def _infer_used_evidence_indices(self, *, answer: str, evidence: list[GroundedGenerationEvidence]) -> list[int]:
-        answer_terms = set(_tokenize(answer))
-        if not answer_terms:
-            return []
-
-        scored_matches: list[tuple[int, float]] = []
-        for index, item in enumerate(evidence):
-            content_terms = set(_tokenize(item.content))
-            if not content_terms:
-                continue
-
-            overlap = answer_terms & content_terms
-            coverage = len(overlap) / max(len(answer_terms), 1)
-            density = len(overlap) / max(len(content_terms), 1)
-            sentence_match = 1.0 if self._answer_sentence_supported(answer, item.content) else 0.0
-            score = (1.5 * coverage) + density + sentence_match
-            if sentence_match or coverage >= 0.45 or (coverage >= 0.25 and len(overlap) >= 3):
-                scored_matches.append((index, score))
-
-        if not scored_matches:
-            return []
-
-        scored_matches.sort(key=lambda item: (item[1], -item[0]), reverse=True)
-        best_score = scored_matches[0][1]
-        kept = [
-            index
-            for index, score in scored_matches
-            if score >= max(0.9, best_score - 0.35)
-        ]
-        return kept[:2]
-
-    def _answer_sentence_supported(self, answer: str, evidence_content: str) -> bool:
-        normalized_answer = " ".join(answer.split()).lower().strip(" .")
-        if not normalized_answer:
-            return False
-
-        evidence_sentences = [
-            " ".join(sentence.split()).lower().strip(" .")
-            for sentence in re.split(r"(?<=[.!?])\s+|\n+", evidence_content)
-            if sentence.strip()
-        ]
-        return any(
-            normalized_answer in sentence or sentence in normalized_answer
-            for sentence in evidence_sentences
-        )
+def _question_seeks_quantity(question: str) -> bool:
+    lowered = question.lower()
+    return lowered.startswith("how many") or lowered.startswith("how much") or "how long" in lowered
