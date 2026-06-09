@@ -600,7 +600,7 @@ def test_flat_foot_definition_completes_as_full_sentence():
     reply = asyncio.run(
         service.generate_reply(
             session=SimpleNamespace(workspace_id=None),
-            user_message=SimpleNamespace(content="What is flat foot?"),
+            user_message=SimpleNamespace(content="what is flat foot"),
         )
     )
 

@@ -41,44 +41,6 @@ class SelectedAnswer:
 
 
 @dataclass(slots=True)
-class QuestionProfile:
-    wants_summary: bool
-    wants_comparison: bool
-    wants_structured_extraction: bool
-    seeks_quantity: bool
-    segment_count: int
-
-    @property
-    def needs_synthesis(self) -> bool:
-        return self.wants_summary or self.wants_comparison or self.segment_count > 1
-
-    @property
-    def prefers_direct_answer(self) -> bool:
-        return not self.needs_synthesis and not self.wants_structured_extraction
-
-    @property
-    def needs_expanded_context(self) -> bool:
-        return self.wants_summary or self.wants_structured_extraction or self.segment_count > 1
-
-    @classmethod
-    def from_question(cls, question: str) -> QuestionProfile:
-        lowered = question.lower()
-        segments = [segment for segment in re.split(r"\?|,|\band\b|\bbut\b|\bor\b", lowered) if segment.strip()]
-        return cls(
-            wants_summary=any(keyword in lowered for keyword in {"summarize", "summary", "overview", "review", "explain"}),
-            wants_comparison=any(keyword in lowered for keyword in {"compare", "difference", "different", "versus", "pros and cons"}),
-            wants_structured_extraction=(
-                lowered.startswith(("list ", "name ", "identify ", "extract "))
-                or "what are" in lowered
-                or "which are" in lowered
-                or "tell me" in lowered
-            ),
-            seeks_quantity=lowered.startswith("how many") or lowered.startswith("how much") or "how long" in lowered,
-            segment_count=len(segments) or 1,
-        )
-
-
-@dataclass(slots=True)
 class AnswerDraft:
     content: str
     used_evidence_indices: list[int]
@@ -237,31 +199,29 @@ class HeuristicFallbackAnswerGenerator:
                 used_evidence_indices=[],
             )
 
-        profile = QuestionProfile.from_question(request.question)
+        structured = self._extract_structured_answer(question=request.question, evidence_items=request.evidence)
+        if structured is not None:
+            return GroundedGenerationResult(content=structured.content, used_evidence_indices=structured.used_evidence_indices)
 
-        if profile.wants_structured_extraction:
-            structured = self._extract_structured_answer(question=request.question, evidence_items=request.evidence)
-            if structured is not None:
-                return GroundedGenerationResult(content=structured.content, used_evidence_indices=structured.used_evidence_indices)
+        seeks_quantity = _question_seeks_quantity(request.question)
 
-        if len(request.evidence) == 1 and profile.prefers_direct_answer:
-            direct = self._direct_answer(question=request.question, evidence=request.evidence[0], seeks_quantity=profile.seeks_quantity)
+        if len(request.evidence) == 1:
+            direct = self._direct_answer(question=request.question, evidence=request.evidence[0], seeks_quantity=seeks_quantity)
             if direct:
                 return GroundedGenerationResult(content=direct, used_evidence_indices=[0])
 
-        if profile.prefers_direct_answer:
-            direct_multi = self._direct_multi_evidence_answer(
-                question=request.question,
-                evidence_items=request.evidence,
-                seeks_quantity=profile.seeks_quantity,
-            )
-            if direct_multi is not None:
-                return GroundedGenerationResult(content=direct_multi.content, used_evidence_indices=direct_multi.used_evidence_indices)
+        direct_multi = self._direct_multi_evidence_answer(
+            question=request.question,
+            evidence_items=request.evidence,
+            seeks_quantity=seeks_quantity,
+        )
+        if direct_multi is not None:
+            return GroundedGenerationResult(content=direct_multi.content, used_evidence_indices=direct_multi.used_evidence_indices)
 
         synthesis = self._synthesis_answer(
             question=request.question,
             evidence_items=request.evidence,
-            max_units=3 if profile.needs_synthesis or len(request.evidence) > 1 else 2,
+            max_units=min(3, max(2, len(request.evidence))),
         )
         if synthesis is not None:
             return GroundedGenerationResult(content=synthesis.content, used_evidence_indices=synthesis.used_evidence_indices)
@@ -275,7 +235,7 @@ class HeuristicFallbackAnswerGenerator:
         evidence: GroundedGenerationEvidence,
         seeks_quantity: bool,
     ) -> str | None:
-        sentence = _first_complete_unit(evidence.content)
+        sentence = self._best_complete_unit(question=question, text=evidence.content)
         if not sentence:
             return None
 
@@ -309,7 +269,7 @@ class HeuristicFallbackAnswerGenerator:
                     values = self._parse_structured_items(inline_value)
                     if not values and line_index + 1 < len(lines):
                         values = self._parse_structured_items(lines[line_index + 1])
-                    if values:
+                    if len(values) >= 2:
                         return AnswerDraft(content=self._format_structured_answer(values), used_evidence_indices=[index])
                 if not label and self._line_matches_question(line, salient_terms) and line_index + 1 < len(lines):
                     values = self._parse_structured_items(lines[line_index + 1])
@@ -460,6 +420,23 @@ class HeuristicFallbackAnswerGenerator:
             return len(_tokenize(unit))
         return len(set(_tokenize(unit)) & query_terms)
 
+    def _best_complete_unit(self, *, question: str, text: str) -> str:
+        units = _split_text_units(text)
+        if not units:
+            return _normalize_complete_text(text)
+
+        query_terms = set(_tokenize(question))
+        ranked = sorted(
+            units,
+            key=lambda unit: (
+                self._sentence_overlap_score(unit, query_terms),
+                self._contains_concrete_fact(unit),
+                -abs(len(unit) - 120),
+            ),
+            reverse=True,
+        )
+        return _normalize_complete_text(ranked[0])
+
     def _contains_concrete_fact(self, text: str) -> bool:
         if re.search(r"\b\d+\b", text):
             return True
@@ -543,7 +520,7 @@ class GroundedChatService:
                 GroundedGenerationEvidence(
                     title=item.result.chunk.document_title or "Untitled Document",
                     locator=item.result.chunk.locator(),
-                    content=self._generation_context(question=user_message.content, evidence=item),
+                    content=self._generation_context(evidence=item),
                 )
                 for item in selected_evidence
             ],
@@ -571,10 +548,16 @@ class GroundedChatService:
             citations=[selected_evidence[index].result.chunk.to_citation() for index in used_indices],
         )
 
-    def _generation_context(self, *, question: str, evidence: SelectedEvidence) -> str:
-        if QuestionProfile.from_question(question).needs_expanded_context:
+    def _generation_context(self, *, evidence: SelectedEvidence) -> str:
+        if self._evidence_needs_expanded_context(evidence):
             return self._trim_context(evidence.result.chunk.text, limit=5000)
         return evidence.best_sentence or self._trim_context(evidence.result.chunk.text, limit=1200)
+
+    def _evidence_needs_expanded_context(self, evidence: SelectedEvidence) -> bool:
+        text = evidence.result.chunk.text
+        if "\n" in text:
+            return True
+        return len(_split_text_units(text)) > 1
 
     def _trim_context(self, text: str, *, limit: int) -> str:
         if len(text) <= limit:
@@ -655,3 +638,8 @@ def _normalize_complete_text(text: str) -> str:
     if normalized[-1] in ".!?":
         return normalized
     return f"{normalized}."
+
+
+def _question_seeks_quantity(question: str) -> bool:
+    lowered = question.lower()
+    return lowered.startswith("how many") or lowered.startswith("how much") or "how long" in lowered
