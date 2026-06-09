@@ -537,12 +537,6 @@ class GroundedChatService:
             generation_result.used_evidence_indices,
             evidence_count=len(selected_evidence),
         )
-        used_indices = self._resolve_used_evidence_indices(
-            generation_result.used_evidence_indices,
-            answer=normalized_answer,
-            evidence=generation_request.evidence,
-            evidence_count=len(selected_evidence),
-        )
         return ChatReply(
             content=normalized_answer,
             citations=[selected_evidence[index].result.chunk.to_citation() for index in used_indices],
